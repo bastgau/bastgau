@@ -9,6 +9,6 @@ Feel free to explore my few public projects and contact me for any collaboration
 
 # My GitHub Stats
 
-<img src="https://github-readme-stats.vercel.app/api?username=bastgau&show_icons=true&theme=transparent" alt="Github Info" />
+<img src="https://github-stats-extended.vercel.app/api?username=bastgau" alt="Github Info" />
 
 Enjoy !
