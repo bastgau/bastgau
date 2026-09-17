@@ -138,7 +138,9 @@ et non à dbt :
 * la streaming table est rafraîchie en `--full-refresh` (dbt recrée le seed amont à chaque run, ce
   qui invalide le checkpoint de streaming, cf. §5.7) ;
 * elle est exclue du `dbt build` de bout en bout, pour la même raison, et les matérialisations
-  adossées à un pipeline DBSQL tournent en `--threads 1` (quota de 1 pipeline actif hors Enterprise).
+  adossées à un pipeline DBSQL tournent en `--threads 1`. Attention : la limite de 1 pipeline DBSQL
+  actif est **propre au tier du compte de test** (le message renvoie vers un upgrade Enterprise),
+  pas une règle générale.
 
 Les 2 SKIP restants sont des limites du workspace, pas de dbt : écriture cross-catalogue (un seul
 catalogue inscriptible, `bootstrap.sh --with-cross-catalog` lève le point si les droits le
@@ -302,7 +304,8 @@ pour que l'échec dbt fasse échouer la tâche du Job.
 Deux choix à connaître :
 
 * **`http_path` vide → le cluster du notebook** (`/sql/protocolv1/o/<orgId>/<clusterId>`). Préférer un
-  SQL warehouse : vues matérialisées et streaming tables sont des fonctionnalités DBSQL.
+  SQL warehouse : les vues matérialisées et streaming tables passent par des pipelines DBSQL
+  (vérifié), et rien ne garantit qu'un cluster puisse les créer (non vérifié).
 * **`fail_on_empty=True`** dans le notebook : dbt traite une sélection vide comme un *warning* et
   sort en 0 — sans ce garde-fou, une faute de frappe dans `--select` ferait un job « vert » qui n'a
   rien construit. Vérifié : le job échoue désormais avec
@@ -410,12 +413,27 @@ soient honorées à l'exécution n'a **pas** été prouvé : le workspace de tes
 Prérequis : cluster **UC-enabled** (access mode Dedicated ou Standard) pour lire/écrire dans Unity
 Catalog, et cluster démarré — dbt ne le réveille pas de façon fiable (non vérifié).
 
-**Ce que ce montage coûte** : les vues matérialisées et les streaming tables disparaissent. Elles
-sont adossées à des pipelines DBSQL, ce que le workspace de test a dit mot pour mot —
-`[DLT ERROR CODE: QUOTA_EXCEEDED_EXCEPTION] the limit for active pipelines of type 'DBSQL' has been
-reached` — et un cluster all-purpose n'a pas de DBSQL. S'y ajoute le tarif DBU all-purpose, plus
-élevé que le SQL warehouse pour du SQL pur, et la facturation continue tant que le cluster tourne
-(autotermination obligatoire) là où un warehouse serverless s'éteint seul.
+**Ce que ce montage coûte.** Trois affirmations de portée différente, à ne pas confondre :
+
+1. **Vérifié, et propre à l'implémentation Databricks (donc général)** : les vues matérialisées et
+   les streaming tables créées par dbt sont adossées à des pipelines DBSQL. Preuves relevées dans le
+   catalogue de test : tables internes `__materialization_mat_*` et `event_log_*` à côté des objets,
+   et le message
+   `[DLT ERROR CODE: QUOTA_EXCEEDED_EXCEPTION] Cannot start update … the limit for active pipelines
+   of type 'DBSQL' has been reached`.
+2. **Propre au compte de test, pas général** : la *valeur* de cette limite — 1 pipeline DBSQL actif,
+   le message invitant lui-même à « upgrading to an Enterprise account tier » — ainsi que le
+   `RESOURCE_EXHAUSTED` sur le compute serverless et l'absence de worker environment. Sur un compte
+   d'un autre tier, ces trois plafonds diffèrent ou disparaissent.
+3. **Non vérifié, documentation seule** : qu'un cluster all-purpose ne puisse pas *créer ni
+   rafraîchir* MV et streaming tables. Le point 1 prouve que ces objets passent par DBSQL, pas
+   qu'un cluster en soit incapable ; l'inférence est raisonnable mais elle n'a pas été testée, et ne
+   pouvait pas l'être ici faute de cluster. À confirmer sur un workspace disposant de compute
+   classique avant d'en faire un critère de choix.
+
+S'y ajoute, côté coût : le tarif DBU all-purpose est plus élevé que celui d'un SQL warehouse pour du
+SQL pur, et un cluster facture tant qu'il tourne (autotermination obligatoire) là où un warehouse
+serverless s'éteint seul — tarification publique, non mesurée ici.
 
 #### Le compromis recommandé
 
