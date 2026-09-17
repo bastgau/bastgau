@@ -2,3 +2,4 @@ env.local
 .venv/
 target/
 logs/
+__pycache__/

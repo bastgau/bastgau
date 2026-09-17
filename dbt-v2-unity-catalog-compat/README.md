@@ -216,3 +216,86 @@ Un seul défaut bloquant à la migration : le **double-quoting des principals de
 Restent non prouvés faute d'environnement adéquat : l'écriture cross-catalogue et les modèles Python
 — les deux sont câblés dans `run_live_checks.sh` et s'activent avec `DBT_CROSS_CATALOG` /
 `DBT_PYTHON_MODEL` dès qu'un workspace le permet.
+
+## 7. Exécuter le job via `dbtRunner`
+
+`runner/` contient l'exécution programmatique, en processus : le moteur tourne dans le processus
+courant et rend les artefacts comme objets Python (`RunResultsArtifact`, `Manifest`,
+`FreshnessResultsArtifact`), au lieu d'un `subprocess` dont il faudrait parser la sortie. Une seule
+instance de `dbtRunner` est réutilisée pour toutes les commandes du job.
+
+| Fichier | Rôle |
+|---|---|
+| `runner/run_dbt_job.py` | script/CLI **et** bibliothèque (`run_dbt_job(...)` → `JobReport`) |
+| `runner/databricks_dbt_notebook.py` | notebook Databricks (format source, à importer tel quel) |
+| `runner/test_notebook_locally.py` | rejoue les cellules du notebook hors Databricks (stubs `dbutils`/`spark`) |
+
+### Script
+
+```bash
+# profil existant
+python runner/run_dbt_job.py --project-dir fixture --profiles-dir fixture --target live \
+  --command "seed" --command "build --exclude st_customers"
+
+# profil généré depuis l'environnement (rien de secret dans le dépôt)
+export DBT_HOST=... DBT_HTTP_PATH=/sql/1.0/warehouses/... DBT_TOKEN=... DBT_CATALOG=... DBT_SCHEMA=...
+python runner/run_dbt_job.py --project-dir fixture --generate-profile \
+  --command build --select "tag:daily" --fail-on-empty
+```
+
+Le `profiles.yml` généré est écrit en 0600 dans un répertoire temporaire et supprimé à la fin, même
+en cas d'échec. Le code de sortie du processus est celui du moteur (0 ok, 1 échec, 2 warnings
+élevés) : utilisable directement dans un ordonnanceur.
+
+En bibliothèque :
+
+```python
+from run_dbt_job import run_dbt_job
+
+report = run_dbt_job(["build"], project_dir="fixture", generate_profile=True, fail_on_empty=True)
+for row in report.rows():
+    print(row["status"], row["unique_id"], row["relation_name"])
+report.raise_for_status()      # lève si une commande a échoué
+```
+
+### Notebook Databricks
+
+Importer `runner/databricks_dbt_notebook.py` dans le workspace (fichier au format *notebook source*,
+reconnu à l'import). Widgets : `project_dir`, `catalog`, `schema`, `http_path`, `secret_scope`,
+`secret_key`, `dbt_version`, `commands`, `threads`.
+
+Ce que fait le notebook, dans l'ordre : `%pip install dbt==<version>` puis `restartPython` (le moteur
+est une extension native : sans redémarrage, c'est l'ancien module qui reste importé) ; résolution du
+projet (dossier voisin `../fixture` par défaut, chemin `/Workspace` ou `/Repos` géré) ; **copie du
+projet sur disque local**, parce que dbt écrit `target/` et `logs/` et que les Workspace files et Git
+folders sont en lecture seule à l'exécution ; jeton lu dans un secret scope (à défaut, le jeton du
+notebook) ; `profiles.yml` généré depuis l'environnement ; exécution via `run_dbt_job` — donc
+exactement le même chemin de code qu'en CLI ; résultats en `display()` ; puis `raise_for_status()`
+pour que l'échec dbt fasse échouer la tâche du Job.
+
+Deux choix à connaître :
+
+* **`http_path` vide → le cluster du notebook** (`/sql/protocolv1/o/<orgId>/<clusterId>`). Préférer un
+  SQL warehouse : vues matérialisées et streaming tables sont des fonctionnalités DBSQL.
+* **`fail_on_empty=True`** dans le notebook : dbt traite une sélection vide comme un *warning* et
+  sort en 0 — sans ce garde-fou, une faute de frappe dans `--select` ferait un job « vert » qui n'a
+  rien construit. Vérifié : le job échoue désormais avec
+  ``dbt run` selected no node (check --select/--exclude)``.
+
+### Ce qui a été testé
+
+Contre le workspace réel, avec le SQL warehouse serverless :
+
+| Cas | Résultat |
+|---|---|
+| Script, profil existant, 2 commandes enchaînées | seed + run OK, résumé par nœud |
+| Script, `--generate-profile` | OK, profil temporaire supprimé après coup |
+| Script, modèle en échec | `job success: False`, code de sortie processus **1** |
+| Notebook rejoué via `test_notebook_locally.py` | 14 cellules, seed + run OK, `dbutils.notebook.exit` atteint |
+| Notebook, modèle en échec | `RuntimeError: dbt job failed (model.uc_compat.broken)` |
+| Notebook, sélection vide | `RuntimeError` grâce à `fail_on_empty` |
+
+**Non testé** : le notebook n'a pas tourné dans Databricks — ce workspace n'a aucun cluster, seulement
+un SQL warehouse, et un notebook exige du compute. Les parties non couvertes par la simulation sont
+donc le `%pip install` + `restartPython`, la lecture d'un vrai secret scope, le repli sur le
+`http_path` du cluster et le rendu de `display()`.
