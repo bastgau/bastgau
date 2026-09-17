@@ -28,39 +28,60 @@ Trois niveaux de preuve, explicitement séparés :
   appelés), sans exécution de modèle.
 * **N3 — exécution** : DDL/DML réellement émis dans UC. Nécessite un workspace.
 
-| Script | Niveaux | Prérequis |
+| Script | Rôle | Prérequis |
 |---|---|---|
-| `run_offline_checks.sh` | N1 + N2 | aucun (installe dbt dans un venv jetable) |
-| `run_live_checks.sh` | N3 | `DBT_HOST`, `DBT_HTTP_PATH`, `DBT_TOKEN` |
+| `run_all.sh` | orchestrateur : enchaîne tout | aucun (`--live` pour la phase N3) |
+| `run_offline_checks.sh` | N1 + N2 : 46 contrôles | aucun (installe dbt dans un venv jetable) |
+| `bootstrap.sh` | découvre et prépare le workspace, écrit `env.local` | `DBT_HOST`, `DBT_TOKEN` |
+| `run_live_checks.sh` | N3 : 24 contrôles exécutés par dbt (+2 skips conditionnels) | `env.local` |
+| `verify_uc_state.sh` | N3 : 14 assertions relues **dans** Unity Catalog | `env.local` |
+| `teardown.sh` | supprime ce que le protocole a créé (dry-run par défaut) | `env.local` |
+| `lib/dbx_api.py` | client REST Databricks (stdlib uniquement) | — |
+
+`run_live_checks.sh` prouve que dbt annonce un succès ; `verify_uc_state.sh` prouve que l'objet dans
+Unity Catalog est bien ce qu'il prétend être (un `MATERIALIZED_VIEW` et pas une table, un `MERGE` et
+pas une reconstruction, un clustering liquide réellement posé, UniForm réellement activé).
 
 Le projet de test (`fixture/`) couvre : namespace UC à 3 niveaux, source dans un autre catalogue,
 écriture cross-catalogue, `catalogs.yml` type `unity`, incrémental MERGE, vue matérialisée,
 streaming table, table Iceberg managée UC, snapshot avec `target_catalog`, grants UC,
-`persist_docs`, tags UC, clustering liquide, `tblproperties`.
+`persist_docs`, tags UC, clustering liquide, `tblproperties`, modèle Python.
+
+### Rejouer le tout
 
 ```bash
-./run_offline_checks.sh            # N1 + N2, ~1 min
-./run_offline_checks.sh 2.0.3      # même protocole sur une autre version
+# 1. hors ligne seulement (aucun identifiant)
+./run_all.sh
+./run_all.sh --version 2.0.3            # même protocole sur une autre version de dbt
 
-export DBT_HOST=<workspace>.cloud.databricks.com
-export DBT_HTTP_PATH=/sql/1.0/warehouses/<id>     # GET /api/2.0/sql/warehouses
+# 2. de bout en bout sur un workspace
+export DBT_HOST=<workspace>.cloud.databricks.com   # sans https://
 export DBT_TOKEN=<PAT>
-export DBT_CATALOG=workspace DBT_SCHEMA=dbt_uc_compat      # schémas jetables
-export DBT_SOURCE_CATALOG=workspace DBT_SOURCE_SCHEMA=dbt_uc_compat_bronze \
-       DBT_SOURCE_TABLE=seed_bronze_customers DBT_SOURCE_TS_COLUMN=_ingested_at
-export DBT_EXT_CATALOG=samples DBT_EXT_SCHEMA=tpch         # lecture cross-catalogue
-export DBT_CROSS_CATALOG=<2e catalogue>                    # optionnel, écriture cross-catalogue
+./run_all.sh --live                      # bootstrap + N1/N2 + N3 + assertions UC
+./run_all.sh --live --teardown           # ... puis nettoyage complet
+
+# 3. étape par étape
+./bootstrap.sh                           # --catalog / --schema / --warehouse pour forcer les cibles
+./bootstrap.sh --with-cross-catalog      # crée un 2e catalogue UC (exige CREATE CATALOG)
+source env.local
 ./run_live_checks.sh
+./verify_uc_state.sh
+./teardown.sh                            # dry-run : affiche le plan
+./teardown.sh --yes --include-snapshots  # exécute
 ```
 
+`bootstrap.sh` ne crée rien dans Unity Catalog sans `--with-cross-catalog` : il découvre le
+metastore, choisit un catalogue inscriptible (jamais un `SYSTEM_CATALOG`), démarre le SQL warehouse,
+vérifie la connexion et écrit `env.local` (chmod 600, ignoré par git). Le jeton ne vit que là.
+
 La phase N3 écrit dans le workspace : `<catalog>.<schema>` (modèles, MV, streaming table, seeds),
-`<catalog>.<schema>_bronze` (table source), `<catalog>.<schema>_lakehouse` (table Iceberg) et
-`<catalog>.snapshots` (snapshot, cf. §5.4). Elle ne supprime rien : nettoyer avec
-`DROP SCHEMA ... CASCADE` après coup.
+`<catalog>.<schema>_bronze` (table source alimentée par un seed), `<catalog>.<schema>_lakehouse`
+(table Iceberg) et `<catalog>.snapshots` (snapshot, cf. §5.4). `teardown.sh` supprime tout cela ;
+le schéma `snapshots` n'est touché qu'avec `--include-snapshots`, son nom étant trop générique.
 
 ## 2. Résultats — phases N1 + N2 (exécutées)
 
-**45 contrôles, 45 PASS, 0 FAIL** sur dbt 2.0.4, Linux x86_64, Python 3.11.
+**46 contrôles, 46 PASS, 0 FAIL** sur dbt 2.0.4, Linux x86_64, Python 3.11.
 
 | Domaine | Vérifié | Preuve |
 |---|---|---|
@@ -91,7 +112,8 @@ ainsi que les DDL `CREATE OR REFRESH STREAMING TABLE`, `CREATE OR REPLACE MATERI
 ## 3. Résultats — phase N3 (exécutée sur un workspace réel)
 
 Workspace : Databricks AWS, Unity Catalog actif (metastore `76951471-…`), catalogue `workspace`,
-SQL warehouse serverless 2X-Small. **22 contrôles PASS, 2 FAIL, 1 SKIP.**
+SQL warehouse serverless 2X-Small. **`run_live_checks.sh` : 24 PASS, 0 FAIL, 2 SKIP** et
+**`verify_uc_state.sh` : 14 PASS, 0 FAIL** (assertions relues dans Unity Catalog).
 
 | Vérifié dans Unity Catalog | Preuve |
 |---|---|
@@ -109,27 +131,29 @@ SQL warehouse serverless 2X-Small. **22 contrôles PASS, 2 FAIL, 1 SKIP.**
 | Analyse statique **stricte** (types + lignage colonne) | `dbt compile --static-analysis strict` |
 | `dbt show` | aperçu de données rendu |
 
-Les 2 FAIL et le SKIP ne sont **pas** des défauts de compatibilité dbt v2 :
+Deux aménagements ont été nécessaires pour rendre la suite rejouable, tous deux dus à Databricks
+et non à dbt :
 
-* `streaming_table` en ré-exécution → `DIFFERENT_DELTA_TABLE_READ_BY_STREAMING_SOURCE` : `dbt seed`
-  recrée la table amont (nouvel id Delta), ce qui invalide le checkpoint du streaming. Voir §5.
-* `dbt build` de bout en bout → quotas du workspace : `QUOTA_EXCEEDED_EXCEPTION` (1 pipeline DBSQL
-  actif maximum hors Enterprise) puis `RESOURCE_EXHAUSTED` sur le compute serverless. Le script
-  sérialise désormais ces étapes (`--threads 1`), mais le quota reste une limite du workspace.
-* écriture cross-catalogue → SKIP : un seul catalogue inscriptible sur ce workspace.
+* la streaming table est rafraîchie en `--full-refresh` (dbt recrée le seed amont à chaque run, ce
+  qui invalide le checkpoint de streaming, cf. §5.7) ;
+* elle est exclue du `dbt build` de bout en bout, pour la même raison, et les matérialisations
+  adossées à un pipeline DBSQL tournent en `--threads 1` (quota de 1 pipeline actif hors Enterprise).
+
+Les 2 SKIP restants sont des limites du workspace, pas de dbt : écriture cross-catalogue (un seul
+catalogue inscriptible, `bootstrap.sh --with-cross-catalog` lève le point si les droits le
+permettent) et modèle Python (aucun cluster ni job, seulement un SQL warehouse).
 
 ## 4. Limites de ce qui a été exécuté
 
 * **Écriture cross-catalogue non prouvée** : elle exige un second catalogue UC inscriptible.
-  Relancer avec `DBT_CROSS_CATALOG=<catalogue>` pour lever ce point.
-* **Rafraîchissement d'une streaming table non prouvé** : bloqué par le quota serverless de ce
-  workspace (la *création* l'est).
-* **Modèles Python non testés en exécution** : ils exigent un cluster all-purpose ou un job,
-  absents de ce workspace (seul un SQL warehouse serverless existe). Le nœud est bien reconnu
-  (`language: python`) et le moteur embarque `databricks__py_write_table`, mais rien n'a été exécuté.
+  `./bootstrap.sh --with-cross-catalog` le crée si le compte a `CREATE CATALOG`, sinon passer
+  `DBT_CROSS_CATALOG=<catalogue existant>`.
+* **Modèles Python non exécutés** : ils exigent un cluster all-purpose ou un job, absents de ce
+  workspace (seul un SQL warehouse serverless existe). Le nœud est reconnu (`language: python`,
+  vérifié hors ligne) et le moteur embarque `databricks__py_write_table`, mais aucun run.
+  `DBT_PYTHON_MODEL=1` active l'étape sur un workspace équipé.
 * Auth OAuth M2M vérifiée jusqu'à l'appel du endpoint OIDC seulement (pas de service principal
   disponible) ; PAT vérifié de bout en bout.
-
 
 ## 5. Points d'attention détectés
 
@@ -158,16 +182,22 @@ documenté dans le fixture (`models/marts/schema.yml`).
    compute Databricks reste `databricks_compute`.
 7. **Streaming table et amont recréé.** Une streaming table qui lit `stream(ref(...))` casse dès que
    dbt recrée la relation amont (`dbt seed`, `--full-refresh` : nouvel id Delta), avec
-   `DIFFERENT_DELTA_TABLE_READ_BY_STREAMING_SOURCE`. La faire lire une table que dbt ne remplace pas,
-   ou la rafraîchir en `--full-refresh`.
-8. **Un `--full-refresh` de streaming table qui échoue laisse l'objet supprimé** : la relation
-   `st_customers` a disparu du catalogue, en laissant derrière les tables internes
-   `__materialization_mat_*` et `event_log_*`. Non atomique : à surveiller en production.
+   `DIFFERENT_DELTA_TABLE_READ_BY_STREAMING_SOURCE`. Conséquence directe : un `dbt build` qui
+   contient à la fois le seed et la streaming table échoue à chaque exécution. Remèdes vérifiés :
+   la rafraîchir en `--full-refresh` (elle se reconstruit alors sans erreur), ou la faire lire une
+   table que dbt ne remplace pas.
+8. **Un `--full-refresh` de streaming table qui échoue laisse l'objet supprimé** : constaté quand le
+   quota serverless a coupé la recréation — `st_customers` avait disparu du catalogue, en laissant
+   les tables internes `__materialization_mat_*` et `event_log_*`. Non atomique : à surveiller en
+   production.
 9. **`dbt show --inline` ajoute `limit N`** : inutilisable sur `SHOW GRANTS` / `DESCRIBE`. Utiliser
    `--limit -1`.
 10. Les modèles introspectifs (`is_incremental()`) ouvrent une connexion **dès le `compile`** : pas de
     compilation 100 % hors ligne d'un projet incrémental.
-11. Le commentaire injecté dans les requêtes annonce `"dbt_version": "2.0.0"` alors que la CLI est en
+11. **`dbt.config()` d'un modèle Python n'accepte que des littéraux** : un `os.environ.get(...)` est
+    refusé au parse (`Non-literal expression found`). Comportement identique à dbt-core 1.x, mais il
+    empêche de paramétrer `submission_method` par l'environnement.
+12. Le commentaire injecté dans les requêtes annonce `"dbt_version": "2.0.0"` alors que la CLI est en
     2.0.4 — cosmétique, mais trompeur dans l'historique des requêtes Databricks.
 
 ## 6. Verdict
@@ -178,7 +208,11 @@ workspace réel : namespace à 3 niveaux, catalogues UC, MERGE incrémental, clu
 (`type: unity`, UniForm), grants et tags UC appliqués, fraîcheur des sources, analyse statique
 stricte, PAT et OAuth M2M.
 
+Chaque affirmation ci-dessus est rejouable : `run_live_checks.sh` fait exécuter dbt, puis
+`verify_uc_state.sh` relit l'état dans Unity Catalog (14 assertions) plutôt que de croire le rapport
+de dbt.
+
 Un seul défaut bloquant à la migration : le **double-quoting des principals de `grants`** (§5.1).
-Restent non prouvés faute d'environnement adéquat : écriture cross-catalogue, rafraîchissement d'une
-streaming table, modèles Python — les trois sont couverts par `run_live_checks.sh` dès qu'un
-workspace le permet.
+Restent non prouvés faute d'environnement adéquat : l'écriture cross-catalogue et les modèles Python
+— les deux sont câblés dans `run_live_checks.sh` et s'activent avec `DBT_CROSS_CATALOG` /
+`DBT_PYTHON_MODEL` dès qu'un workspace le permet.

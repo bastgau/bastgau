@@ -39,7 +39,7 @@ step "target UC schema is writable"           show --inline "select 1 as ok" --l
 
 say "L1. Seed / view / table / incremental in a UC schema"
 step "dbt seed (incl. the bronze source table)" seed
-step "dbt run (view + table + incremental)"    run --exclude mv_customers st_customers iceberg_customers cross_catalog src_customers ext_customers
+step "dbt run (view + table + incremental)"    run --exclude mv_customers st_customers iceberg_customers cross_catalog src_customers ext_customers py_customers
 step "dbt run again (incremental MERGE path)" run -s dim_customers
 step "dbt run --full-refresh"                 run -s dim_customers --full-refresh
 step "dbt test (not_null / unique)"           test
@@ -49,7 +49,9 @@ step "dbt snapshot (target_catalog)"          snapshot
 # workspaces allow a single active pipeline, so these run one at a time.
 say "L2. Databricks-only materializations"
 step "materialized_view"                      run -s mv_customers
-step "streaming_table"                        run -s st_customers
+# --full-refresh keeps the suite replayable: dbt recreates the upstream seed on every
+# run, which invalidates the streaming checkpoint (see README gotcha on streaming tables).
+step "streaming_table"                        run -s st_customers --full-refresh
 step "UC-managed Iceberg (catalogs.yml)"      run -s iceberg_customers
 
 say "L3. Cross-catalog access"
@@ -58,6 +60,12 @@ if [ -n "${DBT_CROSS_CATALOG:-}" ]; then
   step "write into a second UC catalog"       run -s cross_catalog
 else
   skip "cross-catalog write (set DBT_CROSS_CATALOG)"
+fi
+
+if [ -n "${DBT_PYTHON_MODEL:-}" ]; then
+  step "python model (needs a cluster or a job)" run -s py_customers
+else
+  skip "python model (set DBT_PYTHON_MODEL=1 with a cluster-backed target)"
 fi
 
 say "L4. Governance and metadata"
@@ -77,7 +85,9 @@ fi
 say "L5. Introspection-dependent commands"
 step "dbt show (preview)"                     show -s stg_customers --limit 5
 step "dbt compile (strict static analysis)"   compile --static-analysis strict
-step "dbt build (end to end)"                 build --exclude cross_catalog --threads 1
+# st_customers is excluded: `build` reseeds its upstream table, which invalidates the
+# streaming checkpoint. It is covered on its own in L2 with --full-refresh.
+step "dbt build (end to end)"                 build --exclude cross_catalog py_customers st_customers --threads 1
 
 say "Result: $PASS passed, $FAIL failed, $SKIP skipped   (workdir: $WORK)"
 [ "$FAIL" -eq 0 ]

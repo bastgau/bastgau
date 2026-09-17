@@ -66,6 +66,9 @@ assert_contains "cross-catalog model honours catalog" "gold_prod.dbt_bastgau_ana
 assert_contains "snapshot honours target_catalog"    "main.snapshots.snap_customers"         "$(rel snap_customers)"
 assert_contains "iceberg model stays in real catalog" "main.dbt_bastgau_lakehouse"           "$(rel iceberg_customers)"
 
+PY_JSON="$(D list --output json --output-keys name language | grep '^{' | grep py_customers)"
+assert_contains "python model node is recognised" '"language":"python"' "$PY_JSON"
+
 say "4. Compiled SQL is fully qualified with UC three-part names"
 OUT="$(D compile)"
 COMPILED="$(cat "$FIX"/target/compiled/uc_compat/models/marts/mv_customers.sql 2>/dev/null)"
