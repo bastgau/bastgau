@@ -503,7 +503,8 @@ création. Conséquences constatées :
 | `POST …/iceberg/v1/catalogs/dbt_oss/namespaces` en direct | `HTTP 405 Method Not Allowed` |
 | `dbt run` sur un modèle visant ce catalogue | `Failed to commit Iceberg transaction: … (MethodNotAllowed_405)` |
 
-Donc aucune matérialisation dbt n'est possible dans UC OSS, 0.6.0 comprise : ni table, ni schéma. Le premier
+Donc aucune matérialisation dbt n'est possible dans UC OSS, 0.6.0 comprise : ni table, ni schéma —
+pour les versions **publiées** ; l'écriture est visée pour la v0.7, cf. « Support d'écriture » plus bas. Le premier
 essai échouait d'ailleurs plus tôt encore, sur
 `AUTHORIZATION_TYPE is 'oauth2', yet no 'secret' was provided` — l'extension Iceberg de DuckDB
 impose OAuth2 par défaut, d'où `authorization_type: none`.
@@ -527,3 +528,45 @@ conclure au read-only.
   des métadonnées Iceberg (UniForm), absente d'un serveur vierge.
 * L'adaptateur `spark` (expérimental, cf. §7) contre un Spark local muni du plugin UC OSS — l'autre
   voie théorique, hors périmètre ici.
+
+### Support d'écriture : où en est-on ?
+
+La conclusion ci-dessus porte sur les versions **publiées**. Le read-only n'est pas un choix
+d'architecture définitif : c'est un chantier en cours, et l'écriture est au roadmap.
+
+**Ce qui est vérifié, dans le binaire 0.6.0.** `IcebergRestCatalogService` n'expose que huit méthodes
+publiques, toutes en lecture : `config`, `listNamespaces`, `getNamespace`, `tableExists`, `loadTable`,
+`loadView`, `reportMetrics`, `listTables`. Aucune méthode de mutation — ni `createTable`, ni
+`commitTable`, ni `registerTable`, ni `createNamespace`, ni `dropNamespace`, ni `renameTable`. Il n'y
+a donc pas de chemin d'écriture désactivé par configuration : le code n'existe pas dans la release.
+L'endpoint sert une façade de lecture au-dessus de tables Delta UniForm (classes
+`DeltaUniformMetadataIceberg`, `DeltaUniformUtils`, et le contrôle
+`Iceberg table location must match the registered table location.`).
+
+**Ce qu'annonce le projet** — `roadmap.md`, ligne citée telle quelle :
+
+| Feature | Area | v0.3 | v0.4 | v0.5 | v0.6 | v0.7 | v0.8+ |
+|---|---|---|---|---|---|---|---|
+| Delta Uniform tables with read as Iceberg via Iceberg REST API | API + Server | 🛠️ | 🛠️ | ✓ | ✓ | ✓ | ✓ |
+| **Iceberg tables with create+read+write** | API + Server | | | | | **✓** | ✓ |
+| Iceberg view support | API + Server | | | | | | ✓ |
+
+L'écriture (`create+read+write`) est donc visée pour **v0.7**, soit la prochaine version au moment de
+ce test (0.6.0 étant la dernière publiée). Le thème associé du roadmap parle de
+« *Iceberg table lifecycle support* » au titre de « Full Iceberg REST Catalog support ».
+
+**Ce que montre le tracker** (contenu externe, rapporté tel qu'affiché, non vérifié par exécution) :
+des endpoints de mutation atterrissent déjà dans `main` après la 0.6.0 — l'issue *« Iceberg REST
+catalog is missing dropNamespace, updateNamespaceProperties and renameTable »* (#1846) est fermée le
+15/09/2026, alors que le jar 0.6.0 testé ici ne contient aucune de ces méthodes. Restent ouvertes
+*« Iceberg REST catalog does not serve registerTable »* (#1850) et *« Add additional Iceberg REST
+Catalog endpoints »* (#3).
+
+**Ne pas confondre avec Unity Catalog managé (Databricks).** Côté SaaS, l'écriture par Iceberg REST
+existe déjà : des clients externes créent et alimentent des tables Iceberg managées. C'est une autre
+base de code que le serveur OSS — la documentation Databricks ne dit rien du serveur open source, et
+c'est la confusion la plus facile à faire en cherchant sur le sujet.
+
+**Conséquence pratique** : ce test est à rejouer à la sortie de la 0.7. Le contrôle sur les endpoints
+de `run_uc_oss_checks.sh` est écrit pour signaler le basculement (`write endpoints advertised (UC OSS
+now accepts writes — revisit the README)`) au lieu de conclure au read-only.
