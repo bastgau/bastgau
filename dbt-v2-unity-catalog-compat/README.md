@@ -446,3 +446,78 @@ serverless s'éteint seul — tarification publique, non mesurée ici.
 Deux computes, chacun sur son terrain, et pas d'interblocage. Dernier point de vigilance : dbt
 soumet **un job par modèle Python**, donc `threads: 4` avec trois modèles Python déclenche trois
 allocations concurrentes — brider avec `--threads 1` sur un workspace à quota.
+
+## 8. Unity Catalog OSS en local
+
+**Question** : le protocole tourne-t-il contre [Unity Catalog OSS](https://github.com/unitycatalog/unitycatalog)
+en local, sans compte Databricks ?
+
+**Réponse** : l'écriture est impossible, et ce n'est pas dbt qui bloque — c'est UC OSS. Vérifié de
+bout en bout par `uc-oss/run_uc_oss_checks.sh` (**14 contrôles, 14 PASS**) sur UC OSS **0.3.0** et
+dbt **2.0.4**.
+
+### Le montage
+
+Le fixture du protocole vise `type: databricks`, qui exige un endpoint SQL Databricks : il ne peut
+pas cibler UC OSS. Le chemin local passe par l'adaptateur **`duckdb`** (GA en v2) et le *même*
+`catalogs.yml` de type `unity` que côté Databricks :
+
+```yaml
+catalogs:
+  - name: dbt_oss
+    type: unity
+    table_format: iceberg
+    config:
+      duckdb:
+        endpoint: http://127.0.0.1:8081/api/2.1/unity-catalog/iceberg
+        warehouse: dbt_oss          # le catalogue UC
+        authorization_type: none    # UC OSS en mode dev n'a pas d'OAuth2
+```
+
+Clés vérifiées de `config.duckdb` sous un catalogue `type: unity` : `endpoint`, `warehouse`,
+`authorization_type`, `secret`. Rejetées : `url`, `token`, `catalog`, `schema`, `database`, `path`,
+`client_id`, `client_secret`, `oauth2_scope`. `endpoint_type` existe mais n'accepte que
+`GLUE|S3_TABLES` — rien pour UC.
+
+### Ce qui marche
+
+* dbt v2 tourne **entièrement en local** : un modèle construit dans un fichier DuckDB, sans aucun
+  warehouse.
+* `catalogs.yml` `type: unity` + bloc `duckdb` valide au parse.
+* dbt atteint réellement le catalogue **Iceberg REST** de UC OSS, avec le bon préfixe
+  (`/iceberg/v1/catalogs/dbt_oss/namespaces`) — la requête part, elle est bien formée.
+
+### Ce qui bloque
+
+UC OSS 0.3.0 expose **7 endpoints Iceberg REST, tous en lecture** (`GET`/`HEAD`, plus un
+`POST …/metrics`). Aucun endpoint de création. Conséquences constatées :
+
+| Tentative | Réponse |
+|---|---|
+| `POST …/iceberg/v1/catalogs/dbt_oss/namespaces` en direct | `HTTP 405 Method Not Allowed` |
+| `dbt run` sur un modèle visant ce catalogue | `Failed to commit Iceberg transaction: … (MethodNotAllowed_405)` |
+
+Donc aucune matérialisation dbt n'est possible dans UC OSS 0.3.0 : ni table, ni schéma. Le premier
+essai échouait d'ailleurs plus tôt encore, sur
+`AUTHORIZATION_TYPE is 'oauth2', yet no 'secret' was provided` — l'extension Iceberg de DuckDB
+impose OAuth2 par défaut, d'où `authorization_type: none`.
+
+### Rejouer
+
+```bash
+./uc-oss/run_uc_oss_checks.sh            # java 17+, mvn, accès Maven Central et PyPI
+./uc-oss/run_uc_oss_checks.sh 2.0.4 0.4.0   # autre version de dbt / de UC OSS
+```
+
+Le script télécharge le serveur UC OSS depuis **Maven Central** (`io.unitycatalog:unitycatalog-server`,
+GitHub étant inaccessible depuis l'environnement de test), le démarre, crée un catalogue et un schéma
+par son API REST, puis lance dbt. Le contrôle sur les endpoints est écrit pour **détecter l'inverse** :
+si une version ultérieure de UC OSS annonce des endpoints d'écriture, il le signale au lieu de
+conclure au read-only.
+
+### Non testé
+
+* La **lecture** d'une table UC OSS existante par dbt : il aurait fallu une table déjà peuplée avec
+  des métadonnées Iceberg (UniForm), absente d'un serveur vierge.
+* L'adaptateur `spark` (expérimental, cf. §7) contre un Spark local muni du plugin UC OSS — l'autre
+  voie théorique, hors périmètre ici.

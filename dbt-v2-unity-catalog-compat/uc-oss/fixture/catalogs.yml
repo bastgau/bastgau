@@ -1,0 +1,12 @@
+# Unity Catalog OSS serves an Iceberg REST catalog under /iceberg, keyed by `warehouse`
+# (the UC catalog name). `authorization_type: none` skips the OAuth2 flow the DuckDB
+# iceberg extension otherwise requires.
+catalogs:
+  - name: dbt_oss
+    type: unity
+    table_format: iceberg
+    config:
+      duckdb:
+        endpoint: "{{ env_var('UC_OSS_ENDPOINT', 'http://127.0.0.1:8081/api/2.1/unity-catalog/iceberg') }}"
+        warehouse: dbt_oss
+        authorization_type: none

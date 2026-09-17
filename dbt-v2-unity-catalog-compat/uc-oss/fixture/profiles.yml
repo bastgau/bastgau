@@ -1,0 +1,8 @@
+# Local-only target: dbt v2 ships duckdb as a GA adapter, so no warehouse is involved.
+uc_oss:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('UC_OSS_DB', 'local.duckdb') }}"
+      schema: analytics
