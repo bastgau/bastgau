@@ -4,6 +4,11 @@
 # Usage: ./run_offline_checks.sh [dbt_version]   (default: 2.0.4)
 set -uo pipefail
 
+# The offline phase must not be influenced by live credentials.
+unset DBT_HOST DBT_HTTP_PATH DBT_TOKEN DBT_CATALOG DBT_SCHEMA DBT_CROSS_CATALOG \
+      DBT_SOURCE_CATALOG DBT_SOURCE_SCHEMA DBT_SOURCE_TABLE DBT_SOURCE_TS_COLUMN \
+      DBT_EXT_CATALOG DBT_EXT_SCHEMA
+
 DBT_VERSION="${1:-2.0.4}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${WORK_DIR:-$(mktemp -d)}"

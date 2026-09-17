@@ -38,23 +38,22 @@ step "three-level query executes"             show --inline "select current_cata
 step "target UC schema is writable"           show --inline "select 1 as ok" --limit 1
 
 say "L1. Seed / view / table / incremental in a UC schema"
-step "dbt seed"                               seed
-step "dbt run (view + table + incremental)"    run --exclude mv_customers st_customers iceberg_customers cross_catalog src_customers
+step "dbt seed (incl. the bronze source table)" seed
+step "dbt run (view + table + incremental)"    run --exclude mv_customers st_customers iceberg_customers cross_catalog src_customers ext_customers
 step "dbt run again (incremental MERGE path)" run -s dim_customers
 step "dbt run --full-refresh"                 run -s dim_customers --full-refresh
 step "dbt test (not_null / unique)"           test
 step "dbt snapshot (target_catalog)"          snapshot
 
+# Materialized views and streaming tables are backed by DBSQL pipelines. Non-Enterprise
+# workspaces allow a single active pipeline, so these run one at a time.
 say "L2. Databricks-only materializations"
 step "materialized_view"                      run -s mv_customers
-if [ -n "${DBT_SOURCE_TABLE:-}" ]; then
-  step "streaming_table"                      run -s st_customers
-else
-  skip "streaming_table (set DBT_SOURCE_* to a real streaming source)"
-fi
+step "streaming_table"                        run -s st_customers
 step "UC-managed Iceberg (catalogs.yml)"      run -s iceberg_customers
 
-say "L3. Cross-catalog write"
+say "L3. Cross-catalog access"
+step "read a source in another UC catalog"     run -s ext_customers
 if [ -n "${DBT_CROSS_CATALOG:-}" ]; then
   step "write into a second UC catalog"       run -s cross_catalog
 else
@@ -62,13 +61,15 @@ else
 fi
 
 say "L4. Governance and metadata"
-step "UC grants readable after apply"         show --inline "show grants on table ${DBT_CATALOG}.${DBT_SCHEMA}.dim_customers" --limit 20
-step "table properties / liquid clustering"   show --inline "describe table extended ${DBT_CATALOG}.${DBT_SCHEMA}.dim_customers" --limit 60
-step "UC tags applied"                        show --inline "select * from system.information_schema.table_tags where catalog_name='${DBT_CATALOG}' and schema_name='${DBT_SCHEMA}'" --limit 20
+step "UC grants applied"                      show --inline "show grants on table ${DBT_CATALOG}.${DBT_SCHEMA}.dim_customers" --limit -1
+step "liquid clustering + tblproperties"       show --inline "describe detail ${DBT_CATALOG}.${DBT_SCHEMA}.dim_customers" --limit -1
+step "UC tags applied"                        show --inline "select tag_name, tag_value from system.information_schema.table_tags where catalog_name='${DBT_CATALOG}' and schema_name='${DBT_SCHEMA}' and table_name='dim_customers'" --limit -1
+step "UC object types are the real ones"      show --inline "select table_name, table_type from system.information_schema.tables where table_catalog='${DBT_CATALOG}' and table_schema='${DBT_SCHEMA}' and table_name in ('mv_customers','st_customers')" --limit -1
+step "MERGE really ran on the incremental"    show --inline "select count(*) as merges from (describe history ${DBT_CATALOG}.${DBT_SCHEMA}.dim_customers) where operation = 'MERGE'" --limit -1
 step "persist_docs / column comments"         docs generate
 if [ -n "${DBT_SOURCE_TABLE:-}" ]; then
-  step "source view over a foreign UC catalog" run -s src_customers
-  step "source freshness"                      source freshness
+  step "source view (declared source resolves)" run -s src_customers
+  step "source freshness (loaded_at_field)"     source freshness --select source:bronze
 else
   skip "source resolution + freshness (set DBT_SOURCE_*)"
 fi
@@ -76,7 +77,7 @@ fi
 say "L5. Introspection-dependent commands"
 step "dbt show (preview)"                     show -s stg_customers --limit 5
 step "dbt compile (strict static analysis)"   compile --static-analysis strict
-step "dbt build (end to end)"                 build --exclude st_customers cross_catalog src_customers
+step "dbt build (end to end)"                 build --exclude cross_catalog --threads 1
 
 say "Result: $PASS passed, $FAIL failed, $SKIP skipped   (workdir: $WORK)"
 [ "$FAIL" -eq 0 ]

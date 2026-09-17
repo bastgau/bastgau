@@ -1,12 +1,20 @@
 sources:
+  # Source in another schema (live: the table is created by the seed below, so the
+  # protocol needs no pre-existing data and no admin privilege).
   - name: bronze
-    catalog: "{{ env_var('DBT_SOURCE_CATALOG', 'raw_prod') }}" # UC catalog on the source
+    catalog: "{{ env_var('DBT_SOURCE_CATALOG', 'raw_prod') }}"
     schema: "{{ env_var('DBT_SOURCE_SCHEMA', 'crm') }}"
     tables:
-      - name: "{{ env_var('DBT_SOURCE_TABLE', 'customers') }}"
+      - name: customers
         identifier: "{{ env_var('DBT_SOURCE_TABLE', 'customers') }}"
         config: # dbt v2: freshness/loaded_at_field live under `config`
           loaded_at_field: "{{ env_var('DBT_SOURCE_TS_COLUMN', '_ingested_at') }}"
           freshness:
             warn_after: {count: 12, period: hour}
             error_after: {count: 24, period: hour}
+  # Read-only source in a *different* UC catalog (Databricks ships `samples`).
+  - name: ext
+    catalog: "{{ env_var('DBT_EXT_CATALOG', 'samples') }}"
+    schema: "{{ env_var('DBT_EXT_SCHEMA', 'tpch') }}"
+    tables:
+      - name: customer

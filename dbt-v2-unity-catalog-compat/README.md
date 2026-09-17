@@ -42,12 +42,21 @@ streaming table, table Iceberg managée UC, snapshot avec `target_catalog`, gran
 ./run_offline_checks.sh            # N1 + N2, ~1 min
 ./run_offline_checks.sh 2.0.3      # même protocole sur une autre version
 
-export DBT_HOST=adb-xxx.azuredatabricks.net
-export DBT_HTTP_PATH=/sql/1.0/warehouses/xxx
-export DBT_TOKEN=dapi...
-export DBT_CATALOG=main DBT_SCHEMA=dbt_uc_compat   # schéma jetable
+export DBT_HOST=<workspace>.cloud.databricks.com
+export DBT_HTTP_PATH=/sql/1.0/warehouses/<id>     # GET /api/2.0/sql/warehouses
+export DBT_TOKEN=<PAT>
+export DBT_CATALOG=workspace DBT_SCHEMA=dbt_uc_compat      # schémas jetables
+export DBT_SOURCE_CATALOG=workspace DBT_SOURCE_SCHEMA=dbt_uc_compat_bronze \
+       DBT_SOURCE_TABLE=seed_bronze_customers DBT_SOURCE_TS_COLUMN=_ingested_at
+export DBT_EXT_CATALOG=samples DBT_EXT_SCHEMA=tpch         # lecture cross-catalogue
+export DBT_CROSS_CATALOG=<2e catalogue>                    # optionnel, écriture cross-catalogue
 ./run_live_checks.sh
 ```
+
+La phase N3 écrit dans le workspace : `<catalog>.<schema>` (modèles, MV, streaming table, seeds),
+`<catalog>.<schema>_bronze` (table source), `<catalog>.<schema>_lakehouse` (table Iceberg) et
+`<catalog>.snapshots` (snapshot, cf. §5.4). Elle ne supprime rien : nettoyer avec
+`DROP SCHEMA ... CASCADE` après coup.
 
 ## 2. Résultats — phases N1 + N2 (exécutées)
 
@@ -79,44 +88,97 @@ l'implémentation Databricks embarque `databricks__get_create_materialized_view_
 ainsi que les DDL `CREATE OR REFRESH STREAMING TABLE`, `CREATE OR REPLACE MATERIALIZED VIEW`,
 `CLUSTER BY AUTO`, `SET TAGS`.
 
-## 3. Limites de ce qui a été exécuté
+## 3. Résultats — phase N3 (exécutée sur un workspace réel)
 
-* Aucun workspace Databricks n'était disponible (pas d'identifiants dans l'environnement), donc
-  **la phase N3 n'a pas été exécutée**. Le réseau sortant vers Databricks est ouvert depuis cet
-  environnement (`docs.databricks.com` → 301, `accounts.cloud.databricks.com` → 303) : la phase N3
-  est lançable ici dès que des identifiants sont fournis.
-* Restent donc **non vérifiés** : le DDL réellement émis pour `materialized_view`, `streaming_table`
-  et l'Iceberg managé UC ; l'application effective des grants, tags et commentaires dans UC ;
-  le MERGE incrémental ; les modèles Python (soumission de job) ; l'analyse statique *stricte*
-  (types et lignage colonne par colonne — elle exige une connexion) ; la fraîcheur des sources.
-* `materialized` et `incremental_strategy` **ne sont pas validés au parse ni au compile** (une valeur
-  fantaisiste passe) : ces valeurs sont résolues à l'exécution. Toute conclusion sur le support d'une
-  matérialisation Databricks exige donc la phase N3.
+Workspace : Databricks AWS, Unity Catalog actif (metastore `76951471-…`), catalogue `workspace`,
+SQL warehouse serverless 2X-Small. **22 contrôles PASS, 2 FAIL, 1 SKIP.**
 
-## 4. Points d'attention détectés (garde-fous dans le script)
+| Vérifié dans Unity Catalog | Preuve |
+|---|---|
+| `dbt debug`, seed, view, table, incrémental, tests, snapshot | suite N3 |
+| **MERGE incrémental réel** | `describe history` → opérations `MERGE` (v1, v3, v4) et `CREATE OR REPLACE TABLE AS SELECT` au `--full-refresh` |
+| **Clustering liquide + tblproperties** | `describe detail` → `clusteringColumns=["id"]`, `delta.enableChangeDataFeed=true`, feature `clustering` |
+| **Vue matérialisée** | `information_schema.tables` → `mv_customers` = `MATERIALIZED_VIEW` |
+| **Streaming table** | `st_customers` = `STREAMING_TABLE` (créée par dbt) |
+| **Iceberg managé UC** | `workspace.dbt_uc_compat_lakehouse.iceberg_customers` avec `delta.enableIcebergCompatV2 = True` (UniForm) |
+| **Grants UC appliqués** | `show grants` → principal `account users`, action `SELECT` sur `workspace.dbt_uc_compat.dim_customers` |
+| **Tags UC appliqués** | `system.information_schema.table_tags` → `domain = crm` |
+| Lecture cross-catalogue | modèle sur `samples.tpch.customer` depuis le catalogue `workspace` |
+| Source déclarée + fraîcheur | `dbt source freshness` sur `loaded_at_field` |
+| `persist_docs`, `docs generate` | exécutés sans erreur |
+| Analyse statique **stricte** (types + lignage colonne) | `dbt compile --static-analysis strict` |
+| `dbt show` | aperçu de données rendu |
 
-1. **`file_format` vs Iceberg natif UC.** Un `+file_format: delta` au niveau projet/modèle entre en
+Les 2 FAIL et le SKIP ne sont **pas** des défauts de compatibilité dbt v2 :
+
+* `streaming_table` en ré-exécution → `DIFFERENT_DELTA_TABLE_READ_BY_STREAMING_SOURCE` : `dbt seed`
+  recrée la table amont (nouvel id Delta), ce qui invalide le checkpoint du streaming. Voir §5.
+* `dbt build` de bout en bout → quotas du workspace : `QUOTA_EXCEEDED_EXCEPTION` (1 pipeline DBSQL
+  actif maximum hors Enterprise) puis `RESOURCE_EXHAUSTED` sur le compute serverless. Le script
+  sérialise désormais ces étapes (`--threads 1`), mais le quota reste une limite du workspace.
+* écriture cross-catalogue → SKIP : un seul catalogue inscriptible sur ce workspace.
+
+## 4. Limites de ce qui a été exécuté
+
+* **Écriture cross-catalogue non prouvée** : elle exige un second catalogue UC inscriptible.
+  Relancer avec `DBT_CROSS_CATALOG=<catalogue>` pour lever ce point.
+* **Rafraîchissement d'une streaming table non prouvé** : bloqué par le quota serverless de ce
+  workspace (la *création* l'est).
+* **Modèles Python non testés en exécution** : ils exigent un cluster all-purpose ou un job,
+  absents de ce workspace (seul un SQL warehouse serverless existe). Le nœud est bien reconnu
+  (`language: python`) et le moteur embarque `databricks__py_write_table`, mais rien n'a été exécuté.
+* Auth OAuth M2M vérifiée jusqu'à l'appel du endpoint OIDC seulement (pas de service principal
+  disponible) ; PAT vérifié de bout en bout.
+
+
+## 5. Points d'attention détectés
+
+Les points 2 et 3 ont un test de non-régression dans `run_offline_checks.sh` ; le point 1 est
+documenté dans le fixture (`models/marts/schema.yml`).
+
+1. **`grants` : ne pas pré-quoter le principal.** dbt v2 ajoute lui-même les backticks. L'idiome
+   dbt-databricks 1.x, qui entoure de backticks un nom contenant un espace, produit
+   `to ``account users``` et un `PARSE_SYNTAX_ERROR` (SQLSTATE 42601) qui fait échouer le modèle.
+   Écrire le principal nu : `select: ['account users']`.
+   *C'est le seul vrai défaut de compatibilité trouvé, et il casse un projet migré depuis 1.x.*
+2. **`file_format` vs Iceberg natif UC.** Un `+file_format: delta` au niveau projet/modèle entre en
    conflit avec un catalogue `type: unity` / `table_format: iceberg` : le moteur exige
-   `file_format: parquet` (ou `use_uniform: true` avec `delta`). Le message d'erreur pointe une
-   position inutilisable (`:2:34`), sans nommer le modèle fautif — coûteux à diagnostiquer.
-2. **Le nom d'entrée de `catalogs.yml` devient le catalogue UC.** Avec `catalog_name='uc_iceberg_uniform'`
-   et sans `catalog:` explicite, la relation devient `uc_iceberg_uniform.<schéma>.<objet>` : dbt viserait
-   un catalogue UC inexistant. Il faut soit nommer l'entrée exactement comme le catalogue UC, soit
-   fixer `catalog:` sur le modèle (c'est ce que fait le fixture).
-3. **`compute` est réservé par le moteur** (`remote|inline|local|sidecar|service`). Le sélecteur de
-   compute Databricks reste `databricks_compute`.
-4. **Syntaxe v2 sur les sources** : `loaded_at_field` et `freshness` doivent passer sous `config:`,
+   `file_format: parquet`, ou `use_uniform: true` avec `delta`. L'erreur pointe une position
+   inutilisable (`:2:34`) sans nommer le modèle fautif.
+3. **Le nom d'entrée de `catalogs.yml` devient le catalogue UC.** Avec `catalog_name='uc_iceberg_uniform'`
+   et sans `catalog:` explicite, la relation devient `uc_iceberg_uniform.<schéma>.<objet>` : dbt vise
+   un catalogue UC inexistant.
+4. **`target_schema` d'un snapshot est pris littéralement**, sans la concaténation appliquée aux
+   modèles : `schema: lakehouse` donne `dbt_uc_compat_lakehouse`, mais `target_schema: snapshots`
+   donne `workspace.snapshots` — un schéma de premier niveau créé au ras du catalogue. Vérifié sur
+   le workspace de test.
+5. **Syntaxe v2 sur les sources** : `loaded_at_field` et `freshness` doivent passer sous `config:`,
    sinon `dbt1060` (clé ignorée) — migration à prévoir depuis dbt-core 1.x.
-5. Les modèles introspectifs (`is_incremental()`) ouvrent une connexion **dès le `compile`** : pas de
-   compilation 100 % hors ligne d'un projet incrémental.
+6. **`compute` est réservé par le moteur** (`remote|inline|local|sidecar|service`). Le sélecteur de
+   compute Databricks reste `databricks_compute`.
+7. **Streaming table et amont recréé.** Une streaming table qui lit `stream(ref(...))` casse dès que
+   dbt recrée la relation amont (`dbt seed`, `--full-refresh` : nouvel id Delta), avec
+   `DIFFERENT_DELTA_TABLE_READ_BY_STREAMING_SOURCE`. La faire lire une table que dbt ne remplace pas,
+   ou la rafraîchir en `--full-refresh`.
+8. **Un `--full-refresh` de streaming table qui échoue laisse l'objet supprimé** : la relation
+   `st_customers` a disparu du catalogue, en laissant derrière les tables internes
+   `__materialization_mat_*` et `event_log_*`. Non atomique : à surveiller en production.
+9. **`dbt show --inline` ajoute `limit N`** : inutilisable sur `SHOW GRANTS` / `DESCRIBE`. Utiliser
+   `--limit -1`.
+10. Les modèles introspectifs (`is_incremental()`) ouvrent une connexion **dès le `compile`** : pas de
+    compilation 100 % hors ligne d'un projet incrémental.
+11. Le commentaire injecté dans les requêtes annonce `"dbt_version": "2.0.0"` alors que la CLI est en
+    2.0.4 — cosmétique, mais trompeur dans l'historique des requêtes Databricks.
 
-## 5. Verdict
+## 6. Verdict
 
-Sur la base des phases N1 + N2 : **dbt v2 (2.0.4) est compatible avec Databricks et Unity Catalog**
-pour tout ce qui est vérifiable sans warehouse — adaptateur intégré, namespace à 3 niveaux,
-catalogues UC (y compris Iceberg managé via `catalogs.yml` `type: unity`), configs Delta/UC,
-dialecte SQL Databricks, PAT et OAuth M2M.
+**dbt v2 (2.0.4) est compatible avec Databricks et Unity Catalog**, vérifié à l'exécution sur un
+workspace réel : namespace à 3 niveaux, catalogues UC, MERGE incrémental, clustering liquide,
+`tblproperties`, vues matérialisées, streaming tables, Iceberg managé UC via `catalogs.yml`
+(`type: unity`, UniForm), grants et tags UC appliqués, fraîcheur des sources, analyse statique
+stricte, PAT et OAuth M2M.
 
-La compatibilité **fonctionnelle** (matérialisations Databricks, gouvernance UC appliquée, MERGE,
-modèles Python) reste à confirmer par `run_live_checks.sh` sur un workspace. Tant que ce script n'a
-pas tourné, la réponse honnête est : compatible sur contrat et connexion, non prouvé à l'exécution.
+Un seul défaut bloquant à la migration : le **double-quoting des principals de `grants`** (§5.1).
+Restent non prouvés faute d'environnement adéquat : écriture cross-catalogue, rafraîchissement d'une
+streaming table, modèles Python — les trois sont couverts par `run_live_checks.sh` dès qu'un
+workspace le permet.

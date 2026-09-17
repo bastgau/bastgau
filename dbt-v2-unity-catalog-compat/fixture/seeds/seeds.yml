@@ -1,0 +1,8 @@
+seeds:
+  - name: seed_bronze_customers
+    config:
+      schema: bronze # lands in <target_schema>_bronze; used as the `bronze` source
+      column_types:
+        id: bigint
+        name: string
+        _ingested_at: timestamp

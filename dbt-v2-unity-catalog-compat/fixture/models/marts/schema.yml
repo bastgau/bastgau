@@ -1,10 +1,14 @@
 models:
   - name: dim_customers
     config:
-      grants: # UC privileges
-        select: ['`account users`']
+      grants:
+        # dbt v2 quotes the grantee itself: pre-quoting with backticks (the dbt-databricks
+        # 1.x idiom for names with spaces) produces ``account users`` and a parse error.
+        select: ['account users']
       persist_docs: {relation: true, columns: true}
       databricks_tags: {domain: crm}
+    description: "UC governed dimension"
     columns:
       - name: id
+        description: "Customer key"
         data_tests: [not_null, unique]
