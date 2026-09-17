@@ -129,9 +129,24 @@ OUT="$(D run --select variant_local --target memory)"
 expect "an in-memory DuckDB stores VARIANT" 'Finished .run. successfully' "$OUT"
 OUT="$(D show --inline "select typeof(cast('{\"a\":1}' as variant)) as t" --limit 1)"
 expect "DuckDB reports the type as VARIANT" 'VARIANT' "$OUT"
+# JSON -> VARIANT is the real parse_json equivalent; casting a string yields a VARCHAR variant.
+OUT="$(D show --inline "select variant_typeof(cast(cast('{\"a\":1}' as json) as variant)) as t" --limit 1)"
+expect "JSON cast to VARIANT gives an OBJECT" 'OBJECT' "$OUT"
+OUT="$(D show --inline "select variant_typeof(cast('{\"a\":1}' as variant)) as t" --limit 1)"
+expect "casting a string to VARIANT silently gives VARCHAR" 'VARCHAR' "$OUT"
+OUT="$(D show --inline "select cast(variant_extract(cast(cast('{\"a\":1}' as json) as variant),'a') as int) as a" --limit 1)"
+expect "variant_extract reads a key from an OBJECT variant" '1' "$OUT"
 # Databricks' variant functions are not DuckDB's: a Databricks model is not portable as is.
 OUT="$(D show --inline "select parse_json('{\"a\":1}') as p" --limit 1)"
 expect "parse_json (Databricks) is absent from DuckDB" 'parse_json does not exist' "$OUT"
+# `v:a` parses, but as a prefix alias: it means `a AS v`, not a path into the variant.
+OUT="$(D show --inline "select answer: 42" --limit 1)"
+expect "in DuckDB, alias: expr is the prefix-alias syntax" 'answer' "$OUT"
+OUT="$(D show --inline "select v:a from (select cast(cast('{\"a\":1}' as json) as variant) as v)" --limit 1)"
+expect "so v:a resolves as a column named a, and fails" 'Referenced column .a. not found' "$OUT"
+# A VARIANT value cannot cross dbt's Arrow bridge, even though a model can store one.
+OUT="$(D show --inline "select cast(cast('{\"a\":1}' as json) as variant) as v" --limit 1)"
+expect "dbt show cannot return a VARIANT value" 'C Data interface error|Cannot get schema' "$OUT"
 OUT="$(D run --select variant_uc_oss)"
 expect "writing a VARIANT into UC OSS fails on the write path, not the type" 'MethodNotAllowed_405|405' "$OUT"
 # UC OSS does know the type in its metadata model, which matters once writes land.

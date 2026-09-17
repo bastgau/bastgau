@@ -637,21 +637,49 @@ VARIANT est donc *décrivable* dans ses métadonnées : le jour où l'écriture 
 le type n'est pas un obstacle supplémentaire. Non vérifié en revanche : que le chemin Iceberg REST
 sache servir ce type — VARIANT n'existe dans la spec Iceberg qu'à partir de la v3.
 
-**3. DuckDB a son propre VARIANT, mais pas le dialecte Databricks.**
+**3. DuckDB a son propre VARIANT, mais pas le dialecte Databricks.** DuckDB embarqué : **v1.5.4**.
 
-| | Databricks | DuckDB (embarqué dans dbt v2) |
+| | Databricks | DuckDB |
 |---|---|---|
 | Type | `VARIANT` | `VARIANT` (`typeof` le confirme) |
-| Construction | `parse_json(x)` | `cast(x as variant)` — `parse_json` **n'existe pas** |
-| Accès | `payload:a`, `variant_get(p,'$.a','int')` | `variant_extract(p, 'a')` — les deux autres n'existent pas |
-| Projection comparable | `to_json(payload)` | `cast(payload as json)` |
+| Construction depuis du texte JSON | `parse_json(x)` | `cast(cast(x as json) as variant)` — `parse_json` **n'existe pas** |
+| Accès à une clé | `payload:a`, `variant_get(p,'$.a','int')` | `variant_extract(p,'a')`, à caster ensuite |
+| Projection comparable | `to_json(payload)` | `payload::json` |
+| Type interne | — | `variant_typeof()` → `OBJECT(a)`, `VARCHAR`, … |
 
-Un modèle VARIANT écrit pour Databricks n'est donc **pas portable** tel quel vers la cible locale :
-même nom de type, fonctions différentes, et dbt n'offre aucune abstraction cross-dialecte pour ça.
+Un modèle VARIANT écrit pour Databricks n'est donc **pas portable** tel quel vers la cible locale.
 
-**Limite propre à DuckDB** : une base **fichier** est créée en storage version v1.0.0+, qui ne sait
-pas stocker de VARIANT —
+**Trois pièges DuckDB, tous vérifiés :**
+
+1. **`cast('{"a":1}' as variant)` ne fait pas ce qu'on croit** : le résultat est un VARIANT contenant
+   une *chaîne* (`variant_typeof` → `VARCHAR`), et aucune extraction n'en sort quoi que ce soit —
+   silencieusement `NULL`. Il faut passer par JSON : `cast(cast(x as json) as variant)` donne
+   `OBJECT(a)`, et `variant_extract(v,'a')::int` rend bien `1`.
+2. **`v:a` n'est pas un accesseur de chemin en DuckDB** : `alias: expr` est la syntaxe d'**alias
+   préfixé** (`select answer: 42` donne une colonne `answer` valant 42). Donc `v:a` signifie
+   `a AS v` et échoue sur `Referenced column "a" not found in FROM clause!`. La syntaxe `xxx:xxx`
+   existe donc bien en DuckDB — mais elle veut dire tout autre chose que dans Databricks ou
+   Snowflake.
+3. **Une valeur VARIANT ne traverse pas le pont Arrow de dbt** : `dbt show` sur une colonne VARIANT
+   renvoie `Internal: C Data interface error: Cannot get schema from input stream`, alors que la
+   *matérialisation* de cette même colonne fonctionne. Pour l'inspecter, caster (`::json`, `::int`).
+
+**Limite de stockage** : une base **fichier** est créée en storage version v1.0.0+, qui ne sait pas
+stocker de VARIANT —
 `Invalid Input Error: VARIANT columns are not supported in storage versions prior to v1.5.0`.
 Seule une base **in-memory** l'accepte (target `memory` du fixture). Les clés de profil `config` et
-`storage_version` sont acceptées **sans effet** : elles ne remontent pas la version de stockage, et
-rien dans le profil duckdb de dbt ne le permet.
+`storage_version` sont acceptées **sans effet**, et rien dans le profil duckdb de dbt ne permet de
+remonter la version de stockage.
+
+### Versions utilisées, et lesquelles sont choisissables
+
+| Composant | Version testée | Dernière disponible | Choisissable ? |
+|---|---|---|---|
+| dbt | 2.0.4 | 2.0.4 (publiée la veille du test) | oui, `pip install dbt==X` |
+| Unity Catalog OSS | 0.6.0 | 0.6.0 | oui, 2ᵉ argument du script |
+| DuckDB | 1.5.4 | 1.5.5 (PyPI) | **non** |
+
+Le moteur dbt v2 embarque DuckDB dans son extension native : aucun paquet `duckdb` n'est installé
+dans l'environnement (vérifié : `pip list` n'en contient pas, et les modèles duckdb tournent quand
+même). La version de DuckDB suit donc celle de dbt, elle ne se choisit pas — d'où l'écart d'un patch
+avec la 1.5.5 amont.
