@@ -1,0 +1,15 @@
+catalogs:
+  - name: uc_iceberg_uniform
+    type: unity
+    table_format: iceberg
+    config:
+      databricks:
+        use_uniform: true
+        file_format: delta
+  - name: main # entry named after the real UC catalog on purpose (see README gotcha #2)
+    type: unity
+    table_format: iceberg
+    config:
+      databricks:
+        file_format: parquet
+        location_root: s3://REPLACE-ME/uc-managed

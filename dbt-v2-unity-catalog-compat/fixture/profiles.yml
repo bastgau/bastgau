@@ -1,0 +1,40 @@
+# Placeholder credentials: the offline phase never opens a session, and the values
+# below are deliberately not shaped like real Databricks tokens.
+# For the live phase, export DBT_HOST / DBT_HTTP_PATH / DBT_TOKEN and use target `live`.
+uc_compat:
+  target: dev
+  outputs:
+    dev: # PAT auth, Unity Catalog three-level namespace
+      type: databricks
+      host: adb-1234567890123456.7.azuredatabricks.net
+      http_path: /sql/1.0/warehouses/abcdef1234567890
+      token: offline-placeholder-no-real-token
+      catalog: main
+      schema: dbt_bastgau
+      threads: 4
+    oauth_m2m: # OAuth M2M (service principal)
+      type: databricks
+      host: adb-1234567890123456.7.azuredatabricks.net
+      http_path: /sql/1.0/warehouses/abcdef1234567890
+      auth_type: oauth
+      client_id: 11111111-2222-3333-4444-555555555555
+      client_secret: offline-placeholder-no-real-secret
+      catalog: main
+      schema: dbt_bastgau
+      threads: 4
+    other_catalog: # cross-catalog write target
+      type: databricks
+      host: adb-1234567890123456.7.azuredatabricks.net
+      http_path: /sql/1.0/warehouses/abcdef1234567890
+      token: offline-placeholder-no-real-token
+      catalog: gold_prod
+      schema: analytics
+      threads: 4
+    live: # real workspace, credentials from the environment
+      type: databricks
+      host: "{{ env_var('DBT_HOST') }}"
+      http_path: "{{ env_var('DBT_HTTP_PATH') }}"
+      token: "{{ env_var('DBT_TOKEN') }}"
+      catalog: "{{ env_var('DBT_CATALOG', 'main') }}"
+      schema: "{{ env_var('DBT_SCHEMA', 'dbt_uc_compat') }}"
+      threads: 4

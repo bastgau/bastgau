@@ -1,0 +1,10 @@
+models:
+  - name: dim_customers
+    config:
+      grants: # UC privileges
+        select: ['`account users`']
+      persist_docs: {relation: true, columns: true}
+      databricks_tags: {domain: crm}
+    columns:
+      - name: id
+        data_tests: [not_null, unique]

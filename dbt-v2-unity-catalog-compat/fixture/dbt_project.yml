@@ -1,0 +1,12 @@
+name: uc_compat
+version: "1.0.0"
+profile: uc_compat
+model-paths: ["models"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+models:
+  uc_compat:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
