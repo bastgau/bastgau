@@ -453,8 +453,13 @@ allocations concurrentes — brider avec `--threads 1` sur un workspace à quota
 en local, sans compte Databricks ?
 
 **Réponse** : l'écriture est impossible, et ce n'est pas dbt qui bloque — c'est UC OSS. Vérifié de
-bout en bout par `uc-oss/run_uc_oss_checks.sh` (**14 contrôles, 14 PASS**) sur UC OSS **0.3.0** et
-dbt **2.0.4**.
+bout en bout par `uc-oss/run_uc_oss_checks.sh` (**14 contrôles, 14 PASS**) avec dbt **2.0.4**, sur
+UC OSS **0.6.0** (la dernière version) *et* **0.3.0** — résultat identique sur les deux.
+
+Pour connaître les versions disponibles, se fier à la métadonnée du dépôt, pas à l'API de recherche
+(qui a renvoyé 0.3.0 comme « latest » alors que 0.6.0 existe) :
+`curl https://repo1.maven.org/maven2/io/unitycatalog/unitycatalog-server/maven-metadata.xml`.
+Maven Central limite les rafales de requêtes par un `HTTP 429`.
 
 ### Le montage
 
@@ -489,15 +494,16 @@ Clés vérifiées de `config.duckdb` sous un catalogue `type: unity` : `endpoint
 
 ### Ce qui bloque
 
-UC OSS 0.3.0 expose **7 endpoints Iceberg REST, tous en lecture** (`GET`/`HEAD`, plus un
-`POST …/metrics`). Aucun endpoint de création. Conséquences constatées :
+UC OSS expose **7 endpoints Iceberg REST, tous en lecture** (`GET`/`HEAD`, plus un
+`POST …/metrics`) — la liste est **strictement identique en 0.3.0 et en 0.6.0**. Aucun endpoint de
+création. Conséquences constatées :
 
 | Tentative | Réponse |
 |---|---|
 | `POST …/iceberg/v1/catalogs/dbt_oss/namespaces` en direct | `HTTP 405 Method Not Allowed` |
 | `dbt run` sur un modèle visant ce catalogue | `Failed to commit Iceberg transaction: … (MethodNotAllowed_405)` |
 
-Donc aucune matérialisation dbt n'est possible dans UC OSS 0.3.0 : ni table, ni schéma. Le premier
+Donc aucune matérialisation dbt n'est possible dans UC OSS, 0.6.0 comprise : ni table, ni schéma. Le premier
 essai échouait d'ailleurs plus tôt encore, sur
 `AUTHORIZATION_TYPE is 'oauth2', yet no 'secret' was provided` — l'extension Iceberg de DuckDB
 impose OAuth2 par défaut, d'où `authorization_type: none`.
@@ -505,8 +511,8 @@ impose OAuth2 par défaut, d'où `authorization_type: none`.
 ### Rejouer
 
 ```bash
-./uc-oss/run_uc_oss_checks.sh            # java 17+, mvn, accès Maven Central et PyPI
-./uc-oss/run_uc_oss_checks.sh 2.0.4 0.4.0   # autre version de dbt / de UC OSS
+./uc-oss/run_uc_oss_checks.sh              # dbt 2.0.4 + UC OSS 0.6.0 par défaut
+./uc-oss/run_uc_oss_checks.sh 2.0.4 0.3.0  # autre version de dbt / de UC OSS
 ```
 
 Le script télécharge le serveur UC OSS depuis **Maven Central** (`io.unitycatalog:unitycatalog-server`,

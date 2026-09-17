@@ -10,10 +10,14 @@
 #
 # Requirements: java 17+, mvn, python3, network access to Maven Central and PyPI.
 # Usage: ./run_uc_oss_checks.sh [dbt_version] [uc_version]
+#
+# The available server versions come from the authoritative metadata, not the search API:
+#   curl https://repo1.maven.org/maven2/io/unitycatalog/unitycatalog-server/maven-metadata.xml
+# (Maven Central rate-limits bursts with HTTP 429 — space the requests out.)
 set -uo pipefail
 
 DBT_VERSION="${1:-2.0.4}"
-UC_VERSION="${2:-0.3.0}"
+UC_VERSION="${2:-0.6.0}"
 PORT="${UC_OSS_PORT:-8081}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${WORK_DIR:-$(mktemp -d)}"
