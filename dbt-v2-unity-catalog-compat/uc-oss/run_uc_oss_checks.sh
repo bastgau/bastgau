@@ -32,6 +32,7 @@ SERVER_PID=""
 say(){ printf '\n\033[1m%s\033[0m\n' "$*"; }
 ok(){  PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m  %s\n' "$*"; }
 ko(){  FAIL=$((FAIL+1)); printf '  \033[31mFAIL\033[0m  %s\n' "$*"; }
+skip(){ printf '  \033[33mSKIP\033[0m  %s\n' "$*"; }
 # expect <label> <regex> <text>
 expect(){ if grep -qE "$2" <<<"$3"; then ok "$1"; else printf '  \033[31mFAIL\033[0m  %s\n        expected /%s/, got: %s\n' "$1" "$2" "${3:0:240}"; FAIL=$((FAIL+1)); fi; }
 uc(){ curl -sS --max-time 20 --noproxy '*' "$@"; }
@@ -153,6 +154,48 @@ expect "writing a VARIANT into UC OSS fails on the write path, not the type" 'Me
 expect "UC OSS advertises VARIANT among its column types" 'VARIANT' \
   "$(JAVA_TOOL_OPTIONS='' javap -classpath "$UC_HOME/lib/unitycatalog-server-$UC_VERSION.jar" \
       io.unitycatalog.server.model.ColumnTypeName 2>/dev/null)"
+
+say "8. Reading the Delta format locally"
+# A genuine Delta table, written with delta-rs, registered in UC OSS as EXTERNAL DELTA.
+DELTA_DIR="$WORK/delta/customers"
+if "$VENV/bin/pip" install -q deltalake pyarrow 2>/dev/null; then
+  "$VENV/bin/python" - "$DELTA_DIR" <<'PYEOF'
+import sys
+import pyarrow as pa
+from deltalake import write_deltalake
+write_deltalake(sys.argv[1], pa.table({
+    "id": pa.array([1, 2, 3], pa.int64()),
+    "name": pa.array(["alice", "bob", "carol"]),
+    "payload_json": pa.array(['{"a":1}', '{"a":2}', '{"a":3}']),
+}), mode="overwrite")
+PYEOF
+  [ -d "$DELTA_DIR/_delta_log" ] && ok "a Delta table was written locally" || ko "delta-rs write failed"
+
+  export UC_OSS_DELTA_PATH="file://$DELTA_DIR"
+  OUT="$(D run --select delta_source)"
+  expect "dbt reads Delta through delta_scan()" 'Finished .run. successfully' "$OUT"
+  OUT="$(D show --inline "select count(*) as n from analytics.delta_source" --limit 1)"
+  expect "the three Delta rows landed" '3' "$OUT"
+
+  # Register it in UC OSS, then try the documented DuckDB uc_catalog path.
+  COLS='[{"name":"id","type_text":"bigint","type_name":"LONG","type_json":"{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{}}","position":0}]'
+  uc -X POST -H 'Content-Type: application/json' "$API/tables" -d "{\"name\":\"customers\",\"catalog_name\":\"$CATALOG\",\"schema_name\":\"$SCHEMA\",\"table_type\":\"EXTERNAL\",\"data_source_format\":\"DELTA\",\"storage_location\":\"file://$DELTA_DIR\",\"columns\":$COLS}" >/dev/null 2>&1
+  expect "the Delta table is registered in UC OSS" '"name":"customers"' "$(uc "$API/tables?catalog_name=$CATALOG&schema_name=$SCHEMA")"
+  ATTACH="$(D show --inline "install uc_catalog; load uc_catalog; load delta;
+    create or replace secret s (type uc, token 'not-used', endpoint '127.0.0.1:$PORT', aws_region 'us-east-1');
+    attach '$CATALOG' as ucx (type uc_catalog, secret s);
+    select count(*) as n from ucx.$SCHEMA.customers" --limit 1)"
+  # The extension parses UC's column metadata strictly and chokes on type_precision.
+  if grep -qE 'Invalid field found while parsing field: type_precision' <<<"$ATTACH"; then
+    ok "uc_catalog cannot read UC OSS metadata (type_precision) — known incompatibility"
+  elif grep -qE '│ *[0-9]+ *│' <<<"$ATTACH"; then
+    ok "uc_catalog now reads UC OSS tables — revisit the README"
+  else
+    ko "uc_catalog failed for another reason: ${ATTACH:0:160}"
+  fi
+else
+  skip "Delta checks (deltalake/pyarrow could not be installed)"
+fi
 
 say "Result: $PASS passed, $FAIL failed   (workdir: $WORK)"
 [ "$FAIL" -eq 0 ]

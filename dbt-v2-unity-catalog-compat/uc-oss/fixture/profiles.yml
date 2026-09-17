@@ -6,6 +6,8 @@ uc_oss:
       type: duckdb
       path: "{{ env_var('UC_OSS_DB', 'local.duckdb') }}"
       schema: analytics
+      extensions:
+        - delta      # delta_scan(): reading Delta locally, no warehouse involved
     # A file-backed DuckDB is created at storage version v1.0.0+, which cannot hold a
     # VARIANT column; an in-memory database can. dbt exposes no lever to raise the
     # storage version of a file, so the VARIANT case uses this target.

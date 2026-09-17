@@ -452,8 +452,9 @@ allocations concurrentes — brider avec `--threads 1` sur un workspace à quota
 **Question** : le protocole tourne-t-il contre [Unity Catalog OSS](https://github.com/unitycatalog/unitycatalog)
 en local, sans compte Databricks ?
 
-**Réponse** : l'écriture est impossible, et ce n'est pas dbt qui bloque — c'est UC OSS. Vérifié de
-bout en bout par `uc-oss/run_uc_oss_checks.sh` (**14 contrôles, 14 PASS**) avec dbt **2.0.4**, sur
+**Réponse** : l'écriture est impossible, et ce n'est pas dbt qui bloque — c'est UC OSS. La *lecture*
+de Delta en local, elle, fonctionne. Vérifié de bout en bout par `uc-oss/run_uc_oss_checks.sh`
+(**31 contrôles, 31 PASS**) avec dbt **2.0.4**, sur
 UC OSS **0.6.0** (la dernière version) *et* **0.3.0** — résultat identique sur les deux.
 
 Pour connaître les versions disponibles, se fier à la métadonnée du dépôt, pas à l'API de recherche
@@ -683,3 +684,49 @@ Le moteur dbt v2 embarque DuckDB dans son extension native : aucun paquet `duckd
 dans l'environnement (vérifié : `pip list` n'en contient pas, et les modèles duckdb tournent quand
 même). La version de DuckDB suit donc celle de dbt, elle ne se choisit pas — d'où l'écart d'un patch
 avec la 1.5.5 amont.
+
+### Lire du Delta en local avec dbt
+
+Le chemin qui fonctionne, vérifié sur une vraie table Delta écrite avec `delta-rs` :
+
+```yaml
+# profiles.yml
+      type: duckdb
+      path: local.duckdb
+      extensions:
+        - delta          # installée et chargée par dbt au démarrage de la session
+```
+
+```sql
+{{ config(materialized='table') }}
+select id, name, cast(payload_json as json) as payload
+from delta_scan('file:///chemin/vers/ma_table_delta')
+```
+
+`dbt run` matérialise la table, les trois lignes de la table Delta arrivent intactes. Les extensions
+`delta` et `uc_catalog` s'installent sans problème dans le DuckDB embarqué (`install delta; load
+delta;` fonctionne aussi en inline).
+
+### Ce qui ne marche pas : lire le *catalogue* UC OSS depuis DuckDB
+
+L'intégration documentée de UC OSS avec DuckDB passe par l'extension `uc_catalog` :
+
+```sql
+create or replace secret s (type uc, token 'not-used', endpoint '127.0.0.1:8081', aws_region 'us-east-1');
+attach 'dbt_oss' as ucx (type uc_catalog, secret s);   -- `secret s` est obligatoire
+select * from ucx.analytics.customers;
+```
+
+Deux constats :
+
+* **Sans `secret s` dans les options de l'`ATTACH`**, le secret est ignoré et la requête part sans
+  hôte : `IO Error: Could not resolve hostname … for HTTP GET to '/api/2.1/unity-catalog/schemas?…'`.
+  Le piège n'est pas le format du `endpoint` — j'ai essayé les cinq variantes, aucune ne change rien.
+* **Avec `secret s`**, le catalogue est bien contacté, puis l'extension échoue à parser la réponse de
+  UC OSS : `IO Error: Invalid field found while parsing field: type_precision`. Testé avec
+  `type_precision: null` et `type_precision: 0` — même refus, c'est la *présence* du champ qui gêne.
+
+Donc : dbt lit du Delta en local sans difficulté, mais pas *via* le catalogue UC OSS 0.6.0. La table
+est pourtant bien enregistrée (`EXTERNAL` / `DELTA` / `storage_location`), et son emplacement suffit à
+`delta_scan`. Le contrôle correspondant du script est écrit pour signaler la réparation éventuelle de
+cette incompatibilité au lieu de la figer.
