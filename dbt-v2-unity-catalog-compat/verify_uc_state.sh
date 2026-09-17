@@ -74,6 +74,14 @@ if [ -n "${DBT_PYTHON_MODEL:-}" ]; then
     "select table_type, data_source_format from system.information_schema.tables where table_catalog='$CAT' and table_schema='$SCH' and table_name='py_customers'"
 fi
 
+say "Delta + VARIANT"
+expect "payload column is really a VARIANT" 'variant' \
+  "select full_data_type from system.information_schema.columns where table_catalog='$CAT' and table_schema='$SCH' and table_name='variant_events' and column_name='payload'"
+expect "delta variantType feature enabled" 'variantType' \
+  "show tblproperties $CAT.$SCH.variant_events"
+expect "variant accessors produced values" 'alice' \
+  "select user_name from $CAT.$SCH.variant_events where id = 1"
+
 say "Cross-catalog read"
 expect "ext_customers reads another catalog" 'ext_customers' \
   "select table_name from system.information_schema.tables where table_catalog='$CAT' and table_schema='$SCH' and table_name='ext_customers'"

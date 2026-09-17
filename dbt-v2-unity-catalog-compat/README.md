@@ -570,3 +570,53 @@ c'est la confusion la plus facile à faire en cherchant sur le sujet.
 **Conséquence pratique** : ce test est à rejouer à la sortie de la 0.7. Le contrôle sur les endpoints
 de `run_uc_oss_checks.sh` est écrit pour signaler le basculement (`write endpoints advertised (UC OSS
 now accepts writes — revisit the README)`) au lieu de conclure au read-only.
+
+## 9. Delta + VARIANT
+
+Testé sur le workspace réel (DBSQL **2026.36**), tables Delta managées en Unity Catalog.
+`fixture/models/marts/variant_events.sql` porte le cas.
+
+### Ce qui marche
+
+| Vérifié | Preuve |
+|---|---|
+| Colonne `VARIANT` dans une table Delta créée par dbt | `information_schema.columns` → `payload` = `variant` |
+| Features Delta activées **automatiquement** par Databricks | `show tblproperties` → `delta.feature.variantType: supported`, `delta.feature.variantShredding: supported`, `delta.enableVariantShredding: true` |
+| `data_type: variant` dans un **contrat** (`contract: enforced`) | parse + run OK |
+| Analyse statique hors ligne sur le type | `dbt compile` OK |
+| Accesseurs : `payload:user.name::string`, `variant_get`, `try_variant_get`, `schema_of_variant`, `is_variant_null` | relecture : `alice`, `12.5`, `NULL` pour un champ absent, `OBJECT<amount: DECIMAL(3,1), user: OBJECT<name: STRING>>` |
+| Incrémental `merge` avec une colonne VARIANT (`unique_key` sur un entier) | 2 passages verts, dont un vrai MERGE |
+| Test `not_null` sur la colonne VARIANT | passé |
+| `tblproperties` cohabitant avec VARIANT (`enableChangeDataFeed`) | passé |
+
+### Les deux pièges — VARIANT n'a ni égalité ni ordre
+
+Databricks refuse de comparer deux VARIANT. Tout ce que dbt génère avec un `=` ou un `GROUP BY` sur
+cette colonne casse :
+
+| Cas | Erreur exacte |
+|---|---|
+| Test `unique` sur la colonne VARIANT | `[GROUP_EXPRESSION_TYPE_IS_NOT_ORDERABLE] The expression "payload" cannot be used as a grouping expression because its data type "VARIANT" is not an orderable data type. SQLSTATE: 42822` |
+| Snapshot `strategy: check` avec `check_cols: ['payload']`, **au 2ᵉ passage** | `[DATATYPE_MISMATCH.INVALID_ORDERING_TYPE] Cannot resolve "(payload = payload)" … The `=` does not support ordering on type "VARIANT". SQLSTATE: 42K09` |
+
+Le snapshot **réussit au premier passage** (création) et n'échoue qu'au second, quand la stratégie
+`check` compare les colonnes : un CI qui ne joue le snapshot qu'une fois ne verra rien.
+
+### Le contournement, vérifié
+
+Exposer une projection comparable à côté du VARIANT, et faire porter snapshots et tests `unique`
+dessus :
+
+```sql
+select
+    parse_json(raw)          as payload,        -- la donnée, en VARIANT
+    to_json(parse_json(raw)) as payload_json    -- la projection comparable
+```
+
+Avec `check_cols: ['payload_json']`, le snapshot enchaîne **trois passages verts** — la table
+snapshot continue de porter la colonne VARIANT, seule la comparaison change. `data_type: string` pour
+cette colonne dans le contrat.
+
+Autres options non testées ici : `strategy: timestamp` sur une colonne de date (évite toute
+comparaison de contenu), ou éclater les champs utiles en colonnes typées (`variant_get`) et ne
+comparer que celles-là.

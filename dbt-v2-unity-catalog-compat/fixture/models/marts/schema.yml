@@ -12,3 +12,27 @@ models:
       - name: id
         description: "Customer key"
         data_tests: [not_null, unique]
+
+  - name: variant_events
+    config:
+      contract: {enforced: true}   # `variant` is accepted as a contract data type
+    description: "Delta table with a VARIANT column"
+    columns:
+      - name: id
+        data_type: bigint
+        data_tests: [not_null, unique]
+      - name: payload
+        data_type: variant
+        # not_null works on a VARIANT column; `unique` does not (it groups by it).
+        data_tests: [not_null]
+      - name: payload_json
+        data_type: string
+        data_tests: [not_null]
+      - name: user_name
+        data_type: string
+      - name: amount
+        data_type: double
+      - name: missing_field
+        data_type: int
+      - name: inferred_schema
+        data_type: string

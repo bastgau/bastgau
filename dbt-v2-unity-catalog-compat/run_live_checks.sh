@@ -39,7 +39,7 @@ step "target UC schema is writable"           show --inline "select 1 as ok" --l
 
 say "L1. Seed / view / table / incremental in a UC schema"
 step "dbt seed (incl. the bronze source table)" seed
-step "dbt run (view + table + incremental)"    run --exclude mv_customers st_customers iceberg_customers cross_catalog src_customers ext_customers py_customers
+step "dbt run (view + table + incremental)"    run --exclude mv_customers st_customers iceberg_customers cross_catalog src_customers ext_customers py_customers variant_events
 step "dbt run again (incremental MERGE path)" run -s dim_customers
 step "dbt run --full-refresh"                 run -s dim_customers --full-refresh
 step "dbt test (not_null / unique)"           test
@@ -53,6 +53,8 @@ step "materialized_view"                      run -s mv_customers
 # run, which invalidates the streaming checkpoint (see README gotcha on streaming tables).
 step "streaming_table"                        run -s st_customers --full-refresh
 step "UC-managed Iceberg (catalogs.yml)"      run -s iceberg_customers
+step "Delta table with a VARIANT column"      run -s variant_events
+step "tests on a VARIANT column"              test -s variant_events
 
 say "L3. Cross-catalog access"
 step "read a source in another UC catalog"     run -s ext_customers
