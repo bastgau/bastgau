@@ -1,8 +1,15 @@
-# Local-only target: dbt v2 ships duckdb as a GA adapter, so no warehouse is involved.
+# Local-only targets: dbt v2 ships duckdb as a GA adapter, so no warehouse is involved.
 uc_oss:
   target: dev
   outputs:
     dev:
       type: duckdb
       path: "{{ env_var('UC_OSS_DB', 'local.duckdb') }}"
+      schema: analytics
+    # A file-backed DuckDB is created at storage version v1.0.0+, which cannot hold a
+    # VARIANT column; an in-memory database can. dbt exposes no lever to raise the
+    # storage version of a file, so the VARIANT case uses this target.
+    memory:
+      type: duckdb
+      path: ":memory:"
       schema: analytics

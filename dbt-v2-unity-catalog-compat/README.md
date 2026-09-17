@@ -620,3 +620,38 @@ cette colonne dans le contrat.
 Autres options non testées ici : `strategy: timestamp` sur une colonne de date (évite toute
 comparaison de contenu), ou éclater les champs utiles en colonnes typées (`variant_get`) et ne
 comparer que celles-là.
+
+### VARIANT et Unity Catalog OSS
+
+Trois couches distinctes, à ne pas confondre. Vérifié par `uc-oss/run_uc_oss_checks.sh`
+(**20 contrôles, 20 PASS**, section 7) avec UC OSS 0.6.0.
+
+**1. dbt → UC OSS : le type ne change rien.** Un modèle avec colonne VARIANT échoue exactement comme
+un modèle ordinaire, sur le même `MethodNotAllowed_405` à la création du namespace. L'écriture est
+refusée avant que le moindre type soit évalué.
+
+**2. UC OSS connaît le type.** L'énumération `ColumnTypeName` du serveur 0.6.0 contient bien
+`VARIANT` (aux côtés de `BOOLEAN BYTE SHORT INT LONG FLOAT DOUBLE DATE TIMESTAMP TIMESTAMP_NTZ STRING
+BINARY DECIMAL INTERVAL ARRAY STRUCT MAP CHAR NULL USER_DEFINED_TYPE TABLE_TYPE`). Une colonne
+VARIANT est donc *décrivable* dans ses métadonnées : le jour où l'écriture arrive (v0.7 au roadmap),
+le type n'est pas un obstacle supplémentaire. Non vérifié en revanche : que le chemin Iceberg REST
+sache servir ce type — VARIANT n'existe dans la spec Iceberg qu'à partir de la v3.
+
+**3. DuckDB a son propre VARIANT, mais pas le dialecte Databricks.**
+
+| | Databricks | DuckDB (embarqué dans dbt v2) |
+|---|---|---|
+| Type | `VARIANT` | `VARIANT` (`typeof` le confirme) |
+| Construction | `parse_json(x)` | `cast(x as variant)` — `parse_json` **n'existe pas** |
+| Accès | `payload:a`, `variant_get(p,'$.a','int')` | `variant_extract(p, 'a')` — les deux autres n'existent pas |
+| Projection comparable | `to_json(payload)` | `cast(payload as json)` |
+
+Un modèle VARIANT écrit pour Databricks n'est donc **pas portable** tel quel vers la cible locale :
+même nom de type, fonctions différentes, et dbt n'offre aucune abstraction cross-dialecte pour ça.
+
+**Limite propre à DuckDB** : une base **fichier** est créée en storage version v1.0.0+, qui ne sait
+pas stocker de VARIANT —
+`Invalid Input Error: VARIANT columns are not supported in storage versions prior to v1.5.0`.
+Seule une base **in-memory** l'accepte (target `memory` du fixture). Les clés de profil `config` et
+`storage_version` sont acceptées **sans effet** : elles ne remontent pas la version de stockage, et
+rien dans le profil duckdb de dbt ne le permet.

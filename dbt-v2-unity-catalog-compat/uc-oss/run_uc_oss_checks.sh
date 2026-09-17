@@ -105,7 +105,7 @@ expect "dbt reports $DBT_VERSION" "$DBT_VERSION" "$("$DBT" --version 2>&1)"
 FIX="$WORK/fixture"; cp -r "$HERE/fixture" "$FIX"
 export UC_OSS_DB="$WORK/local.duckdb"
 export UC_OSS_ENDPOINT="$API/iceberg"
-D(){ (cd "$FIX" && "$DBT" "$@" --project-dir "$FIX" --profiles-dir "$FIX" --no-manage-state 2>&1); }
+D(){ (cd "$FIX" && UC_OSS_DB="${UC_OSS_DB}" "$DBT" "$@" --project-dir "$FIX" --profiles-dir "$FIX" --no-manage-state 2>&1); }
 
 say "5. dbt runs locally with no warehouse at all"
 OUT="$(D run --select local_only)"
@@ -118,6 +118,26 @@ expect "catalogs.yml type: unity + duckdb validates" 'successfully' "$OUT"
 OUT="$(D run --select uc_oss_write)"
 expect "dbt reaches the UC OSS Iceberg endpoint" 'iceberg/v1/catalogs/'"$CATALOG" "$OUT"
 expect "the write is refused by UC OSS, not by dbt" 'MethodNotAllowed_405|405' "$OUT"
+
+say "7. VARIANT: DuckDB's own type, and what UC OSS does with it"
+# A file-backed DuckDB is created at storage version v1.0.0+, which cannot hold VARIANT,
+# and no profile key raises that (config/storage_version are accepted but ignored).
+OUT="$(D run --select variant_local)"
+expect "a file-backed DuckDB refuses to store VARIANT" 'storage versions prior to v1.5.0' "$OUT"
+# In memory, the same model materializes.
+OUT="$(D run --select variant_local --target memory)"
+expect "an in-memory DuckDB stores VARIANT" 'Finished .run. successfully' "$OUT"
+OUT="$(D show --inline "select typeof(cast('{\"a\":1}' as variant)) as t" --limit 1)"
+expect "DuckDB reports the type as VARIANT" 'VARIANT' "$OUT"
+# Databricks' variant functions are not DuckDB's: a Databricks model is not portable as is.
+OUT="$(D show --inline "select parse_json('{\"a\":1}') as p" --limit 1)"
+expect "parse_json (Databricks) is absent from DuckDB" 'parse_json does not exist' "$OUT"
+OUT="$(D run --select variant_uc_oss)"
+expect "writing a VARIANT into UC OSS fails on the write path, not the type" 'MethodNotAllowed_405|405' "$OUT"
+# UC OSS does know the type in its metadata model, which matters once writes land.
+expect "UC OSS advertises VARIANT among its column types" 'VARIANT' \
+  "$(JAVA_TOOL_OPTIONS='' javap -classpath "$UC_HOME/lib/unitycatalog-server-$UC_VERSION.jar" \
+      io.unitycatalog.server.model.ColumnTypeName 2>/dev/null)"
 
 say "Result: $PASS passed, $FAIL failed   (workdir: $WORK)"
 [ "$FAIL" -eq 0 ]
