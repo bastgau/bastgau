@@ -362,3 +362,69 @@ Les alternatives testées et écartées : dbt v2 n'a **plus** le `method: sessio
 `lakecompute` sont **expérimentaux** — hors de la liste GA (`snowflake, bigquery, databricks,
 redshift, duckdb, salesforce, clickhouse`), derrière `DBT_ALLOW_EXPERIMENTAL_ADAPTERS=true`, et
 `lakecompute` fait paniquer le moteur (§5.16).
+
+### Topologie de compute : combien, et lequel pour quoi
+
+Un projet mêlant SQL et Python consomme **trois** computes distincts par défaut : l'orchestrateur,
+le endpoint SQL, et le compute de soumission des modèles Python. Aucun `submission_method` ne
+réutilise le processus courant — les valeurs présentes dans le moteur sont `all_purpose_cluster`,
+`job_cluster`, `serverless_cluster`, `workflow_job`.
+
+| Montage | Computes Databricks | Remarque |
+|---|---|---|
+| Notebook serverless + warehouse + modèle Python | 3 | **interblocage** si le quota serverless est à 1 (§5.17) |
+| CLI (CI ou poste) + warehouse + modèle Python | 2 | pas d'interblocage — c'est ainsi que le modèle Python a été validé |
+| CLI + warehouse, aucun modèle Python | 1 | l'orchestration ne coûte rien côté Databricks |
+| Cluster all-purpose seul | 1 | voir les contreparties ci-dessous |
+
+L'orchestration ne fait que du parsing et de l'attente d'I/O : la sortir de Databricks est le levier
+le plus simple pour descendre à deux computes et supprimer l'interblocage.
+
+#### Tout sur un seul cluster all-purpose
+
+```yaml
+# profiles.yml — le SQL passe par l'endpoint Thrift du cluster, pas par un warehouse
+type: databricks
+host: <workspace>.cloud.databricks.com
+http_path: /sql/protocolv1/o/<orgId>/<clusterId>
+token: "{{ env_var('DBT_TOKEN') }}"
+catalog: main
+schema: analytics
+```
+
+```python
+# le modèle Python cible le même cluster que le SQL
+def model(dbt, session):
+    dbt.config(materialized="table",
+               submission_method="all_purpose_cluster",
+               cluster_id="<le même clusterId>",
+               create_notebook=False)
+```
+
+`cluster_id`, `http_path` et `create_notebook` sont **vérifiés** comme clés valides du schéma v2 pour
+un modèle Python (contrôle négatif : `existing_cluster_id` → `Ignored unexpected key`). Qu'elles
+soient honorées à l'exécution n'a **pas** été prouvé : le workspace de test est serverless-only
+(worker environment `serverless-<orgId>`, `clusters/list-zones` → `No such workerEnvironment`,
+`clusters/create` → `does not have any associated worker environments`).
+
+Prérequis : cluster **UC-enabled** (access mode Dedicated ou Standard) pour lire/écrire dans Unity
+Catalog, et cluster démarré — dbt ne le réveille pas de façon fiable (non vérifié).
+
+**Ce que ce montage coûte** : les vues matérialisées et les streaming tables disparaissent. Elles
+sont adossées à des pipelines DBSQL, ce que le workspace de test a dit mot pour mot —
+`[DLT ERROR CODE: QUOTA_EXCEEDED_EXCEPTION] the limit for active pipelines of type 'DBSQL' has been
+reached` — et un cluster all-purpose n'a pas de DBSQL. S'y ajoute le tarif DBU all-purpose, plus
+élevé que le SQL warehouse pour du SQL pur, et la facturation continue tant que le cluster tourne
+(autotermination obligatoire) là où un warehouse serverless s'éteint seul.
+
+#### Le compromis recommandé
+
+| Charge | Compute |
+|---|---|
+| Orchestration `dbtRunner` | CI ou poste de travail — aucun compute Databricks |
+| Modèles SQL, MV, streaming tables | SQL warehouse (`http_path` du profil) |
+| Modèles Python | cluster all-purpose, via `cluster_id` au niveau du modèle |
+
+Deux computes, chacun sur son terrain, et pas d'interblocage. Dernier point de vigilance : dbt
+soumet **un job par modèle Python**, donc `threads: 4` avec trois modèles Python déclenche trois
+allocations concurrentes — brider avec `--threads 1` sur un workspace à quota.
