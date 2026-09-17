@@ -130,6 +130,7 @@ SQL warehouse serverless 2X-Small. **`run_live_checks.sh` : 24 PASS, 0 FAIL, 2 S
 | `persist_docs`, `docs generate` | exécutés sans erreur |
 | Analyse statique **stricte** (types + lignage colonne) | `dbt compile --static-analysis strict` |
 | `dbt show` | aperçu de données rendu |
+| **Modèle Python** | `submission_method="serverless_cluster"` → table Delta managée `py_customers` créée dans UC |
 
 Deux aménagements ont été nécessaires pour rendre la suite rejouable, tous deux dus à Databricks
 et non à dbt :
@@ -148,12 +149,15 @@ permettent) et modèle Python (aucun cluster ni job, seulement un SQL warehouse)
 * **Écriture cross-catalogue non prouvée** : elle exige un second catalogue UC inscriptible.
   `./bootstrap.sh --with-cross-catalog` le crée si le compte a `CREATE CATALOG`, sinon passer
   `DBT_CROSS_CATALOG=<catalogue existant>`.
-* **Modèles Python non exécutés** : ils exigent un cluster all-purpose ou un job, absents de ce
-  workspace (seul un SQL warehouse serverless existe). Le nœud est reconnu (`language: python`,
-  vérifié hors ligne) et le moteur embarque `databricks__py_write_table`, mais aucun run.
-  `DBT_PYTHON_MODEL=1` active l'étape sur un workspace équipé.
+* **Connexion via un cluster classique non testée** : l'org du workspace de test est
+  *serverless-only* (`CREATE cluster` → `does not have any associated worker environments`), donc le
+  `http_path` de type `/sql/protocolv1/o/<orgId>/<clusterId>` n'a pas pu être exercé. Seul le
+  `http_path` de SQL warehouse l'a été.
 * Auth OAuth M2M vérifiée jusqu'à l'appel du endpoint OIDC seulement (pas de service principal
   disponible) ; PAT vérifié de bout en bout.
+* **Modèle Python depuis le notebook non prouvé** : la soumission fonctionne (vérifiée en CLI,
+  §7), mais lancée depuis un notebook serverless elle s'interbloque sur le quota de ce workspace
+  (§5.17). Elle est donc exclue du `build` joué par le notebook.
 
 ## 5. Points d'attention détectés
 
@@ -197,7 +201,27 @@ documenté dans le fixture (`models/marts/schema.yml`).
 11. **`dbt.config()` d'un modèle Python n'accepte que des littéraux** : un `os.environ.get(...)` est
     refusé au parse (`Non-literal expression found`). Comportement identique à dbt-core 1.x, mais il
     empêche de paramétrer `submission_method` par l'environnement.
-12. Le commentaire injecté dans les requêtes annonce `"dbt_version": "2.0.0"` alors que la CLI est en
+12. **Le `method` d'un profil `databricks` n'est pas validé** : `method: zzz_bogus` passe le parse
+    sans un mot. La clé est simplement ignorée — pratique pour se croire configuré alors que non.
+13. **`%pip install "dbt==$widget"` n'interpole pas dans un job** : pip reçoit le littéral
+    `$dbt_version` et échoue (`PipError ... returned non-zero exit status 1`). Constaté sur le
+    premier run du notebook ; il faut appeler la magic depuis Python
+    (`get_ipython().run_line_magic("pip", f"install dbt=={version}")`).
+14. **Un chemin workspace passé en paramètre doit être préfixé `/Workspace`** : `project_dir` valant
+    `/Users/<moi>/x` donne `FileNotFoundError` côté notebook ; le notebook résout désormais les deux
+    formes.
+15. **Un nœud en `warn` laisse la commande en succès** (exit 0) : le modèle Python remonte
+    `warn` + `Invalid timeout value, using default of 0` tout en construisant sa table. À filtrer
+    soi-même si un warning doit bloquer.
+16. **L'adaptateur expérimental `lakecompute` fait paniquer le moteur** avec un profil minimal
+    (`panicked at dbt-main/src/compilation.rs:2687: called Option::unwrap() on a None value`) au lieu
+    de rendre une erreur de configuration.
+17. **Modèle Python lancé depuis un notebook serverless = interblocage** sur un workspace à quota :
+    dbt soumet le modèle comme job Databricks séparé, ce job attend un créneau de compute serverless,
+    et le créneau est occupé par le notebook qui l'a soumis. Constaté : sous-job
+    `workspace-…-py_customers-…` en `QUEUED` pendant 800 s, notebook parent en `RUNNING`, aucun des
+    deux n'avançant. Lancer les modèles Python depuis un autre point d'entrée (CLI, tâche dédiée).
+18. Le commentaire injecté dans les requêtes annonce `"dbt_version": "2.0.0"` alors que la CLI est en
     2.0.4 — cosmétique, mais trompeur dans l'historique des requêtes Databricks.
 
 ## 6. Verdict
@@ -212,10 +236,12 @@ Chaque affirmation ci-dessus est rejouable : `run_live_checks.sh` fait exécuter
 `verify_uc_state.sh` relit l'état dans Unity Catalog (14 assertions) plutôt que de croire le rapport
 de dbt.
 
+Les modèles Python sont également prouvés (soumission `serverless_cluster`, table créée dans UC), et
+le projet tourne aussi bien en CLI qu'en notebook Databricks sur compute serverless (§7).
+
 Un seul défaut bloquant à la migration : le **double-quoting des principals de `grants`** (§5.1).
-Restent non prouvés faute d'environnement adéquat : l'écriture cross-catalogue et les modèles Python
-— les deux sont câblés dans `run_live_checks.sh` et s'activent avec `DBT_CROSS_CATALOG` /
-`DBT_PYTHON_MODEL` dès qu'un workspace le permet.
+Reste non prouvée l'écriture cross-catalogue, faute d'un second catalogue inscriptible sur ce
+workspace : `DBT_CROSS_CATALOG` l'active.
 
 ## 7. Exécuter le job via `dbtRunner`
 
@@ -284,18 +310,55 @@ Deux choix à connaître :
 
 ### Ce qui a été testé
 
-Contre le workspace réel, avec le SQL warehouse serverless :
+Script, contre le workspace réel (SQL warehouse serverless) :
 
 | Cas | Résultat |
 |---|---|
-| Script, profil existant, 2 commandes enchaînées | seed + run OK, résumé par nœud |
-| Script, `--generate-profile` | OK, profil temporaire supprimé après coup |
-| Script, modèle en échec | `job success: False`, code de sortie processus **1** |
-| Notebook rejoué via `test_notebook_locally.py` | 14 cellules, seed + run OK, `dbutils.notebook.exit` atteint |
-| Notebook, modèle en échec | `RuntimeError: dbt job failed (model.uc_compat.broken)` |
-| Notebook, sélection vide | `RuntimeError` grâce à `fail_on_empty` |
+| Profil existant, 2 commandes enchaînées | seed + run OK, résumé par nœud |
+| `--generate-profile` | OK, profil temporaire supprimé après coup |
+| Modèle en échec | `job success: False`, code de sortie processus **1** |
+| Modèle Python, `submission_method="serverless_cluster"` | job Databricks soumis, **table Delta managée créée** dans UC (`py_customers`, lignes conformes), 2 min 3 s |
 
-**Non testé** : le notebook n'a pas tourné dans Databricks — ce workspace n'a aucun cluster, seulement
-un SQL warehouse, et un notebook exige du compute. Les parties non couvertes par la simulation sont
-donc le `%pip install` + `restartPython`, la lecture d'un vrai secret scope, le repli sur le
-`http_path` du cluster et le rendu de `display()`.
+Notebook, **exécuté dans Databricks sur compute serverless** (job `dbt-v2-uc-compat-notebook`,
+tâche sans `existing_cluster_id` ni `job_cluster_key` ni `cluster_instance`) :
+
+| Run | Résultat |
+|---|---|
+| `seed` + `run --select stg_customers` | `SUCCESS` — `dbt ok: 2 nodes, exit 0`, 42 s |
+| `build --exclude st_customers mv_customers cross_catalog py_customers` | `SUCCESS` — `dbt ok: 11 nodes, exit 0` |
+| Modèle en échec / sélection vide (via `test_notebook_locally.py`) | `RuntimeError`, tâche en échec |
+
+Deux bugs du notebook trouvés **par** ces exécutions, corrigés : l'interpolation de widget dans
+`%pip` (§5.13) et le préfixe `/Workspace` sur un chemin passé en paramètre (§5.14).
+
+Le déploiement est scripté : `runner/deploy_and_run_notebook.py` téléverse le notebook et le projet
+dans le workspace, crée (ou met à jour) un job dont la tâche notebook tourne en serverless, le
+déclenche et rend la main avec le résultat.
+
+```bash
+source env.local
+python runner/deploy_and_run_notebook.py --commands "build --exclude st_customers"
+python runner/deploy_and_run_notebook.py --no-run     # déploiement seul
+```
+
+### Peut-on se passer du SQL warehouse ?
+
+Non pour les modèles SQL, et c'est structurel : l'adaptateur `databricks` se connecte par un
+endpoint SQL (`http_path`), jamais par la session Spark ambiante du notebook. Deux formes existent —
+SQL warehouse (`/sql/1.0/warehouses/<id>`, **vérifiée**) et cluster all-purpose
+(`/sql/protocolv1/o/<orgId>/<clusterId>`, **non vérifiée** ici : l'org de test est serverless-only,
+`clusters/create` répond `does not have any associated worker environments`).
+
+Le notebook orchestre donc, mais n'exécute rien : le DDL/DML part vers le warehouse.
+
+| Rôle | Compute |
+|---|---|
+| Parsing, DAG, artefacts (`dbtRunner`) | compute du notebook (serverless ici) |
+| `CREATE` / `MERGE` / `GRANT`, MV, streaming tables | SQL warehouse |
+| Modèles Python | job Databricks séparé (`submission_method`), **sans** warehouse |
+
+Les alternatives testées et écartées : dbt v2 n'a **plus** le `method: session` de dbt-spark 1.x
+(méthodes acceptées : `thrift`, `http`, `livy`, `spark-connect`), et les adaptateurs `spark` comme
+`lakecompute` sont **expérimentaux** — hors de la liste GA (`snowflake, bigquery, databricks,
+redshift, duckdb, salesforce, clickhouse`), derrière `DBT_ALLOW_EXPERIMENTAL_ADAPTERS=true`, et
+`lakecompute` fait paniquer le moteur (§5.16).

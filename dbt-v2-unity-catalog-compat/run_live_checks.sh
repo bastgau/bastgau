@@ -63,9 +63,9 @@ else
 fi
 
 if [ -n "${DBT_PYTHON_MODEL:-}" ]; then
-  step "python model (needs a cluster or a job)" run -s py_customers
+  step "python model (serverless submission)"    run -s py_customers
 else
-  skip "python model (set DBT_PYTHON_MODEL=1 with a cluster-backed target)"
+  skip "python model (set DBT_PYTHON_MODEL=1; the fixture submits to serverless)"
 fi
 
 say "L4. Governance and metadata"

@@ -21,6 +21,7 @@ dbutils.widgets.text("project_dir", "", "Project dir (Repos/Workspace/Volume pat
 dbutils.widgets.text("catalog", "workspace", "UC catalog")
 dbutils.widgets.text("schema", "dbt_uc_compat", "UC schema")
 dbutils.widgets.text("http_path", "", "SQL warehouse http_path (blank = this cluster)")
+dbutils.widgets.text("host", "", "Workspace host (blank = detect)")
 dbutils.widgets.text("secret_scope", "", "Secret scope holding the token")
 dbutils.widgets.text("secret_key", "dbt_token", "Secret key holding the token")
 dbutils.widgets.text("dbt_version", "2.0.4", "dbt version to install")
@@ -31,10 +32,16 @@ dbutils.widgets.text("threads", "4", "threads")
 
 # MAGIC %md ## 1. Install dbt v2
 # MAGIC v2 bundles every adapter, so `dbt-databricks` must NOT be installed alongside it.
+# MAGIC
+# MAGIC `%pip install "dbt==$dbt_version"` does **not** interpolate the widget in a Job run
+# MAGIC (pip receives the literal `$dbt_version` and fails), so the magic is invoked from
+# MAGIC Python with the value substituted here.
 
 # COMMAND ----------
 
-# MAGIC %pip install --quiet "dbt==$dbt_version"
+get_ipython().run_line_magic(  # noqa: F821  (provided by the notebook runtime)
+    "pip", f"install --quiet dbt=={dbutils.widgets.get('dbt_version')}"
+)
 
 # COMMAND ----------
 
@@ -60,7 +67,15 @@ secret_key = dbutils.widgets.get("secret_key").strip()
 threads = int(dbutils.widgets.get("threads") or 4)
 commands = [line.strip() for line in dbutils.widgets.get("commands").splitlines() if line.strip()]
 
-ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+host = dbutils.widgets.get("host").strip()
+
+# The notebook context is the only way to get the path, the tags and the API token.
+# Serverless and classic compute expose it the same way, but keep it optional so a
+# missing piece degrades into a clear message instead of an AttributeError.
+try:
+    ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+except Exception as exc:  # pragma: no cover - runtime specific
+    raise RuntimeError(f"no notebook context available: {exc}")
 
 
 def resolve(path):
@@ -70,18 +85,45 @@ def resolve(path):
 
 notebook_dir = resolve(os.path.dirname(ctx.notebookPath().get()))
 
-if not project_dir:
+if project_dir:
+    # A workspace path may be given with or without the /Workspace prefix.
+    project_dir = resolve(project_dir)
+else:
     # Default to the sibling of this notebook's folder (…/runner → …/fixture).
     project_dir = os.path.join(notebook_dir, "..", "fixture")
 project_dir = os.path.realpath(project_dir)
+if not os.path.isdir(project_dir):
+    raise RuntimeError(f"project_dir does not exist: {project_dir}")
 
-host = spark.conf.get("spark.databricks.workspaceUrl")
+if not host:
+    # spark.conf carries it on classic compute; serverless may not, so fall back to
+    # the context's browser host name.
+    for source in (
+        lambda: spark.conf.get("spark.databricks.workspaceUrl"),
+        lambda: ctx.browserHostName().get(),
+        lambda: ctx.tags().apply("browserHostName"),
+    ):
+        try:
+            host = source()
+        except Exception:  # pragma: no cover - runtime specific
+            host = ""
+        if host:
+            break
+if not host:
+    raise RuntimeError("could not detect the workspace host: set the `host` widget")
+host = host.replace("https://", "").rstrip("/")
 
 if not http_path:
     # Fall back to this cluster's SQL endpoint. A SQL warehouse is preferable for dbt:
     # materialized views and streaming tables are DBSQL features.
-    org_id = ctx.tags().apply("orgId")
-    cluster_id = ctx.tags().apply("clusterId")
+    try:
+        org_id = ctx.tags().apply("orgId")
+        cluster_id = ctx.tags().apply("clusterId")
+    except Exception as exc:  # serverless has no cluster to borrow
+        raise RuntimeError(
+            "no cluster http_path available (serverless compute): set the `http_path` "
+            f"widget to a SQL warehouse path ({exc})"
+        )
     http_path = f"/sql/protocolv1/o/{org_id}/{cluster_id}"
 
 if secret_scope:

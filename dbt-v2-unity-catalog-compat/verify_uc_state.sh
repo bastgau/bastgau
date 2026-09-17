@@ -68,6 +68,12 @@ expect "UC tag domain=crm applied" 'crm' \
 expect "column comment persisted" 'Customer key' \
   "select comment from system.information_schema.columns where table_catalog='$CAT' and table_schema='$SCH' and table_name='dim_customers' and column_name='id'"
 
+if [ -n "${DBT_PYTHON_MODEL:-}" ]; then
+  say "Python model"
+  expect "py_customers is a managed Delta table" 'MANAGED.*DELTA' \
+    "select table_type, data_source_format from system.information_schema.tables where table_catalog='$CAT' and table_schema='$SCH' and table_name='py_customers'"
+fi
+
 say "Cross-catalog read"
 expect "ext_customers reads another catalog" 'ext_customers' \
   "select table_name from system.information_schema.tables where table_catalog='$CAT' and table_schema='$SCH' and table_name='ext_customers'"

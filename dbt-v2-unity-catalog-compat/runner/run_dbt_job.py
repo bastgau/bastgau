@@ -64,10 +64,17 @@ class CommandOutcome:
     nodes: List[Dict[str, Any]] = field(default_factory=list)
     elapsed_time: float = 0.0
 
+    # dbt node statuses: success/pass are good, skipped is neutral, warn is a
+    # non-blocking warning (the command still exits 0 or 2), the rest are failures.
+    OK_STATUSES = ("success", "pass", "skipped", "warn", "listed")
+
     @property
     def failed_nodes(self) -> List[Dict[str, Any]]:
-        # dbt statuses: success / pass are good, skipped is neutral, the rest are not.
-        return [n for n in self.nodes if n["status"] not in ("success", "pass", "skipped")]
+        return [n for n in self.nodes if n["status"] not in self.OK_STATUSES]
+
+    @property
+    def warned_nodes(self) -> List[Dict[str, Any]]:
+        return [n for n in self.nodes if n["status"] == "warn"]
 
 
 @dataclass
@@ -222,6 +229,8 @@ def run_dbt_job(
             log_line(f"  {state} (exit {outcome.exit_code}, {len(outcome.nodes)} nodes)")
             if outcome.exception:
                 log_line(f"  engine error: {outcome.exception}")
+            for node in outcome.warned_nodes:
+                log_line(f"  ! {node['unique_id']}: warn {node['message'] or ''}")
             for node in outcome.failed_nodes:
                 log_line(f"  ✗ {node['unique_id']}: {node['status']} {node['message'] or ''}")
             if not outcome.success and stop_on_failure:
