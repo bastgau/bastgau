@@ -930,7 +930,14 @@ python runner/deploy_and_run_notebook.py \
   --commands seed --commands "run --select dim_customers variant_events"
 ```
 
-Résultat constaté : `SUCCESS`, `dbt ok: 5 nodes, exit 0`. Le notebook prend deux widgets de plus,
+Résultat constaté : `SUCCESS`, `dbt ok: 5 nodes, exit 0`.
+
+**Et le SQL passe bien par le SQL warehouse**, vérifié de deux façons indépendantes : la tâche du job
+n'a aucun cluster attaché et porte `http_path = /sql/1.0/warehouses/…` ; l'historique du warehouse,
+filtré sur la fenêtre exacte du run, montre **34 requêtes, toutes en `client_application: Databricks
+Dbt`**. Le compute serverless n'héberge que le processus dbt. (Le commentaire `"dbt_version"` injecté
+par dbt n'apparaît pas dans le `query_text` renvoyé par l'API d'historique : c'est
+`client_application` qui identifie l'émetteur.) Le notebook prend deux widgets de plus,
 `pip_spec` et `profile_name`, et `runner/run_dbt_job.py` importe `dbtRunner` depuis `dbt.runner`
 (v2) ou `dbt.cli.main` (1.x) — **un seul module pour les deux moteurs**, l'`exit_code` absent en 1.x
 étant déduit du succès.
