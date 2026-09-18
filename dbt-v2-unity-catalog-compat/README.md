@@ -794,3 +794,65 @@ enregistre), mais ce n'est plus dbt qui pilote l'enregistrement.
 | dbt v2 + `catalogs.yml type: unity` (Iceberg REST) | ❌ `405` |
 | dbt v2 + `plugins:` | ❌ clé ignorée |
 | dbt v2 + `external format=delta` | ❌ format refusé |
+
+## 10. Synthèse : testé / non testé
+
+Quatre combinaisons possibles, dont **trois ont été exercées** et une pas du tout.
+
+| | Databricks (warehouse SQL) | Unity Catalog OSS (local) |
+|---|---|---|
+| **dbt v2** (`dbt` 2.0.4) | ✅ **46 offline + 24 live + 14 assertions UC** | ✅ **31 contrôles** — lecture oui, écriture non |
+| **dbt v1** (`dbt-core` 1.12.5) | ❌ **jamais exécuté** | ✅ **10 contrôles** via `dbt-duckdb` 1.11.0 + plugin |
+
+### dbt v2 × Databricks — vérifié
+
+Adaptateur intégré · namespace à 3 niveaux · source dans un autre catalogue · `catalogs.yml`
+`type: unity` · MERGE incrémental (prouvé par `describe history`) · `--full-refresh` · tests ·
+snapshot `target_catalog` · **vue matérialisée** · **streaming table** · **Iceberg managé UC**
+(UniForm) · clustering liquide · `tblproperties` · **grants** et **tags** UC appliqués ·
+`persist_docs` · fraîcheur des sources · lecture cross-catalogue · `dbt show` · analyse statique
+stricte · `dbt build` complet · **modèle Python** (`serverless_cluster`) · **VARIANT** (type,
+features `variantType`/`variantShredding`, contrat, accesseurs, MERGE) · PAT · **`dbtRunner`** en
+script · **notebook exécuté en serverless** dans le workspace.
+
+### dbt v2 × Databricks — non vérifié
+
+| Point | Pourquoi |
+|---|---|
+| Écriture cross-catalogue | un seul catalogue inscriptible ; `--with-cross-catalog` jamais exercé |
+| `http_path` de cluster all-purpose | org *serverless-only* : `clusters/create` refusé |
+| OAuth M2M de bout en bout | vérifié jusqu'à l'appel du endpoint OIDC, pas de service principal |
+| Modèle Python **depuis le notebook** | interblocage sur l'unique créneau serverless (le chemin CLI, lui, est vérifié) |
+| Rafraîchissement incrémental d'une streaming table | le checkpoint est invalidé par la recréation du seed |
+| MV/streaming tables sur cluster all-purpose | inférence documentaire, jamais testée |
+
+### dbt v1 × Databricks — trou complet
+
+**Rien n'a été exécuté** avec `dbt-core` 1.x + `dbt-databricks` sur le workspace. Conséquence directe
+sur le point le plus sensible du rapport : le défaut de `grants` (§5.1) est vérifié **côté v2**
+uniquement — que l'idiome à backticks fonctionne en 1.x est une affirmation *documentaire*, non
+mesurée. Si la migration 1.x → 2.0 est l'enjeu, c'est la première chose à combler.
+
+### UC OSS — vérifié
+
+Serveur 0.6.0 **et** 0.3.0 lancés depuis Maven Central · Iceberg REST : 7 endpoints en lecture,
+`405` en écriture (idem avec une colonne VARIANT) · `catalogs.yml` `type: unity` + bloc `duckdb`
+(`endpoint`, `warehouse`, `authorization_type`, `secret`) · dbt tourne 100 % en local · **`delta_scan`
+lit une vraie table Delta** · `ColumnTypeName` contient `VARIANT` · VARIANT DuckDB (JSON→VARIANT,
+`variant_extract`, limite storage v1.5.0, `v:a` = alias préfixé, Arrow) · **écriture réussie** en
+dbt v1 + plugin (Delta + API UC native) puis relecture.
+
+### UC OSS — non vérifié
+
+| Point | Pourquoi |
+|---|---|
+| Lecture *via* le catalogue UC depuis DuckDB | testé et **en échec** (`type_precision`), pas non testé |
+| Incrémental / MERGE / snapshot par le chemin plugin | seul un `external` en écrasement complet a été exercé |
+| Authentification UC OSS | serveur en mode `dev`, aucun jeton exigé |
+| Adaptateur `spark` (expérimental) + Spark local | hors périmètre |
+| UC OSS 0.7 (écriture Iceberg REST au roadmap) | pas encore publiée |
+
+### Versions
+
+`dbt` 2.0.4 (DuckDB **1.5.4** embarqué, non choisissable) · `dbt-core` 1.12.5 + `dbt-duckdb` 1.11.0 ·
+Unity Catalog OSS 0.6.0 et 0.3.0 · DBSQL 2026.36 sur le workspace de test.
