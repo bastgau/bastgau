@@ -32,7 +32,8 @@ NOTEBOOK_BASENAME = "databricks_dbt_notebook"
 # Files worth shipping: the notebook's module, and the dbt project itself.
 UPLOAD = [
     ("runner", ["run_dbt_job.py"]),
-    ("fixture", None),  # None: everything under it
+    ("fixture", None),          # dbt v2 project
+    ("dbt1x-databricks", None), # dbt-core 1.x project
 ]
 SKIP_DIRS = {"target", "logs", "__pycache__", ".venv"}
 SKIP_FILES = {"env.local", "profiles.yml"}  # the notebook generates its own profile
@@ -140,6 +141,9 @@ def main(argv=None):
     parser.add_argument("--job-name", default="dbt-v2-uc-compat-notebook")
     parser.add_argument("--commands", action="append", help="dbt command, repeatable (default: build)")
     parser.add_argument("--dbt-version", default="2.0.4")
+    parser.add_argument("--pip-spec", default="", help="pip spec to install instead of dbt==<version>, e.g. dbt-databricks==1.12.5")
+    parser.add_argument("--project", default="fixture", help="project folder to run: fixture (v2) or dbt1x-databricks")
+    parser.add_argument("--profile-name", default="", help="profile name in dbt_project.yml (default: uc_compat, or uc_compat_v1 for the 1.x project)")
     parser.add_argument("--secret-scope", default="", help="scope holding the token (default: the run-as user's token)")
     parser.add_argument("--no-run", action="store_true", help="deploy only")
     args = parser.parse_args(argv)
@@ -154,8 +158,11 @@ def main(argv=None):
     for path in deploy(workspace_dir):
         print(f"  {path}")
 
+    profile_name = args.profile_name or ("uc_compat_v1" if args.project == "dbt1x-databricks" else "uc_compat")
     parameters = {
-        "project_dir": f"{workspace_dir}/fixture",
+        "project_dir": f"{workspace_dir}/{args.project}",
+        "pip_spec": args.pip_spec,
+        "profile_name": profile_name,
         "catalog": os.environ.get("DBT_CATALOG", "main"),
         "schema": os.environ.get("DBT_SCHEMA", "dbt_uc_compat"),
         "http_path": os.environ.get("DBT_HTTP_PATH", ""),

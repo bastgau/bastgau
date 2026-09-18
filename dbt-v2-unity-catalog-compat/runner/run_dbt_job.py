@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Run a dbt v2 job in-process through dbtRunner, against Databricks / Unity Catalog.
+"""Run a dbt job in-process through dbtRunner, against Databricks / Unity Catalog.
+
+Works with both engines: dbt v2 (`dbt.runner`) and dbt-core 1.x (`dbt.cli.main`).
 
 Why dbtRunner rather than shelling out to the CLI: the engine stays in the current
 process, so the caller gets the run artifacts as Python objects (RunResultsArtifact,
@@ -36,7 +38,10 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
-from dbt.runner import dbtRunner, dbtRunnerResult
+try:  # dbt v2 (the Fusion engine) exposes the runner here
+    from dbt.runner import dbtRunner, dbtRunnerResult
+except ImportError:  # dbt-core 1.x keeps it in the CLI module
+    from dbt.cli.main import dbtRunner, dbtRunnerResult  # type: ignore[no-redef]
 
 PROFILE_TEMPLATE = """\
 {profile_name}:
@@ -210,10 +215,14 @@ def run_dbt_job(
 
             log_line(f"→ dbt {' '.join(argv)}")
             result: dbtRunnerResult = runner.invoke(argv)
+            # dbt-core 1.x has no exit_code on the result; derive it from success.
+            exit_code = getattr(result, "exit_code", None)
+            if exit_code is None:
+                exit_code = 0 if result.success else 1
             outcome = CommandOutcome(
                 command=argv,
                 success=bool(result.success),
-                exit_code=result.exit_code,
+                exit_code=exit_code,
                 exception=str(result.exception) if result.exception else None,
                 nodes=_extract_nodes(result.result),
                 elapsed_time=getattr(result.result, "elapsed_time", 0.0) or 0.0,

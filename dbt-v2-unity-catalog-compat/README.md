@@ -814,7 +814,8 @@ enregistre), mais ce n'est plus dbt qui pilote l'enregistrement.
 
 **dbt v1**
 
-* ❓ **Databricks** (`dbt-databricks`) — trou complet, la question des `grants` comprise.
+* ✅ **Databricks** (`dbt-databricks` 1.12.5) — **20/20**, en local et dans un notebook
+  serverless ; la question des `grants` est tranchée (§11).
 * ✅ **UC OSS en écriture** via `dbt-duckdb` + plugin (API UC native) — vérifié ici, 10/10.
 * ✅ **UC OSS via Spark** — rapporté par l'utilisateur de ce dépôt, **non reproduit ici**. Cohérent
   avec le reste : `dbt-spark` 1.x a `method: session`, que dbt v2 a supprimé, et l'intégration Spark
@@ -825,7 +826,7 @@ Quatre combinaisons possibles, dont **trois ont été exercées** et une pas du 
 | | Databricks (warehouse SQL) | Unity Catalog OSS (local) |
 |---|---|---|
 | **dbt v2** (`dbt` 2.0.4) | ✅ **46 offline + 24 live + 14 assertions UC** | ✅ **31 contrôles** — lecture oui, écriture non |
-| **dbt v1** (`dbt-core` 1.12.5) | ❌ **jamais exécuté** | ✅ **10 contrôles** via `dbt-duckdb` 1.11.0 + plugin |
+| **dbt v1** (`dbt-core` 1.12.x) | ✅ **20 contrôles** (§11) | ✅ **10 contrôles** via `dbt-duckdb` 1.11.0 + plugin |
 
 ### dbt v2 × Databricks — vérifié
 
@@ -849,12 +850,10 @@ script · **notebook exécuté en serverless** dans le workspace.
 | Rafraîchissement incrémental d'une streaming table | le checkpoint est invalidé par la recréation du seed |
 | MV/streaming tables sur cluster all-purpose | inférence documentaire, jamais testée |
 
-### dbt v1 × Databricks — trou complet
+### dbt v1 × Databricks — comblé depuis (§11)
 
-**Rien n'a été exécuté** avec `dbt-core` 1.x + `dbt-databricks` sur le workspace. Conséquence directe
-sur le point le plus sensible du rapport : le défaut de `grants` (§5.1) est vérifié **côté v2**
-uniquement — que l'idiome à backticks fonctionne en 1.x est une affirmation *documentaire*, non
-mesurée. Si la migration 1.x → 2.0 est l'enjeu, c'est la première chose à combler.
+20 contrôles passés, en local et dans un notebook serverless. Le défaut de `grants` (§5.1) est
+désormais mesuré sur les deux moteurs, et la forme portable est identifiée.
 
 ### UC OSS — vérifié
 
@@ -879,3 +878,64 @@ dbt v1 + plugin (Delta + API UC native) puis relecture.
 
 `dbt` 2.0.4 (DuckDB **1.5.4** embarqué, non choisissable) · `dbt-core` 1.12.5 + `dbt-duckdb` 1.11.0 ·
 Unity Catalog OSS 0.6.0 et 0.3.0 · DBSQL 2026.36 sur le workspace de test.
+
+## 11. dbt v1 × Databricks : le trou est comblé
+
+`run_dbt1x_databricks_checks.sh` — **20 contrôles, 20 PASS** — sur le même workspace et le même
+warehouse que les suites v2, dans son propre schéma (`dbt_uc_compat_v1`). Projet :
+`dbt1x-databricks/`. Versions : **dbt-core 1.12.3 + dbt-databricks 1.12.5**.
+
+### Le point qui motivait le test : les `grants`
+
+Le défaut §5.1 est maintenant vérifié **des deux côtés**, ce n'était plus de la documentation :
+
+| Forme dans `grants.select` | dbt-core 1.x | dbt v2 (2.0.4) |
+|---|---|---|
+| principal pré-quoté entre backticks (idiome 1.x) | ✅ grant correct | ❌ `PARSE_SYNTAX_ERROR` SQLSTATE 42601 |
+| `['account users']` (nue) | ✅ grant correct | ✅ grant correct |
+
+Les deux écritures produisent en 1.x exactement le même grant, relu dans UC :
+`account users | SELECT | TABLE`. **La forme nue est donc portable** — c'est la seule à écrire si le
+projet doit tourner sur les deux moteurs, et le correctif de migration tient en une ligne de YAML.
+
+### Le reste, vérifié en 1.x
+
+Namespace UC à 3 niveaux · seed vers `<schema>_bronze` · incrémental **MERGE** (prouvé par
+`describe history`) · clustering liquide · tests · snapshot (`target_schema` pris **littéralement**,
+comme en v2) · source avec `catalog` + `schema` · `source freshness` · colonne **VARIANT** sous
+contrat `enforced` (`data_type: variant` accepté, colonne bien `variant` dans UC) · **vue
+matérialisée** (`MATERIALIZED_VIEW` dans UC) · **`table_format: iceberg`** → `delta.enableIcebergCompatV2`.
+
+Autrement dit : sur ce périmètre, **1.x et 2.0 se comportent pareil**, aux `grants` près.
+
+### Deux écarts de syntaxe à connaître
+
+* **Sources** : en 1.x, `loaded_at_field` et `freshness` se déclarent au niveau supérieur — mais
+  dbt-core 1.12 émet déjà `[WARNING][PropertyMovedToConfigDeprecation]` et pointe vers la forme sous
+  `config:` que v2 rend obligatoire. La rupture v2 est donc annoncée dès 1.12.
+* **Iceberg** : 1.x a `table_format: iceberg` directement dans le modèle ; v2 exige un
+  `catalogs.yml` avec `type: unity`. Deux écritures, le même résultat physique (UniForm).
+
+### Exécution *dans* Databricks
+
+Le même projet 1.x tourne dans le workspace, sur compute **serverless**, via le notebook devenu
+bi-moteur :
+
+```bash
+source env.local
+export DBT_SCHEMA=dbt_uc_compat_v1
+python runner/deploy_and_run_notebook.py \
+  --job-name dbt-v1-uc-compat-notebook \
+  --project dbt1x-databricks --pip-spec dbt-databricks \
+  --commands seed --commands "run --select dim_customers variant_events"
+```
+
+Résultat constaté : `SUCCESS`, `dbt ok: 5 nodes, exit 0`. Le notebook prend deux widgets de plus,
+`pip_spec` et `profile_name`, et `runner/run_dbt_job.py` importe `dbtRunner` depuis `dbt.runner`
+(v2) ou `dbt.cli.main` (1.x) — **un seul module pour les deux moteurs**, l'`exit_code` absent en 1.x
+étant déduit du succès.
+
+Bug trouvé en exécutant : `spark.createDataFrame(rows)` échouait avec
+`[CANNOT_DETERMINE_TYPE] Some of types cannot be determined after inferring` dès qu'une colonne du
+rapport était `None` sur toutes les lignes (`relation_name` d'un test, par exemple). Le notebook
+envoie désormais un schéma explicite en chaînes.

@@ -1,0 +1,39 @@
+version: 2
+
+models:
+  - name: dim_customers
+    config:
+      grants:
+        # Portable across 1.x and 2.0: the principal is NOT pre-quoted (see the README).
+        select: ['account users']
+      persist_docs: {relation: true, columns: true}
+    description: "UC governed dimension (dbt 1.x)"
+    columns:
+      - name: id
+        description: "Customer key"
+        tests: [not_null, unique]
+
+  - name: variant_events
+    config:
+      contract: {enforced: true}
+    columns:
+      - name: id
+        data_type: bigint
+      - name: payload
+        data_type: variant
+      - name: payload_json
+        data_type: string
+
+sources:
+  # dbt 1.x syntax: loaded_at_field and freshness at the TOP level, not under `config`.
+  - name: bronze
+    catalog: "{{ env_var('DBT_CATALOG', 'main') }}"
+    schema: "{{ env_var('DBT_SCHEMA_V1', 'dbt_uc_compat_v1') }}_bronze"
+    tables:
+      - name: seed_bronze_v1
+        loaded_at_field: _ingested_at
+        freshness:
+          # Wide thresholds on purpose: the seed carries a fixed timestamp, so this
+          # checks that freshness *runs* on UC, not that the fixture is fresh.
+          warn_after: {count: 520, period: hour}
+          error_after: {count: 8760, period: hour}

@@ -1,0 +1,4 @@
+name: uc_compat_v1
+version: "1.0.0"
+config-version: 2
+profile: uc_compat_v1

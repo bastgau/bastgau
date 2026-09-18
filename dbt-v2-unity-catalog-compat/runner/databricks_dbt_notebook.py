@@ -25,6 +25,10 @@ dbutils.widgets.text("host", "", "Workspace host (blank = detect)")
 dbutils.widgets.text("secret_scope", "", "Secret scope holding the token")
 dbutils.widgets.text("secret_key", "dbt_token", "Secret key holding the token")
 dbutils.widgets.text("dbt_version", "2.0.4", "dbt version to install")
+# Anything pip can install. Leave blank for dbt==<dbt_version> (v2); set it to
+# e.g. dbt-databricks==1.12.5 to run the same notebook on dbt-core 1.x.
+dbutils.widgets.text("pip_spec", "", "pip spec (blank = dbt==<dbt_version>)")
+dbutils.widgets.text("profile_name", "uc_compat", "profile name in dbt_project.yml")
 dbutils.widgets.text("commands", "build", "dbt commands, one per line")
 dbutils.widgets.text("threads", "4", "threads")
 
@@ -39,8 +43,9 @@ dbutils.widgets.text("threads", "4", "threads")
 
 # COMMAND ----------
 
+_spec = dbutils.widgets.get("pip_spec").strip() or f"dbt=={dbutils.widgets.get('dbt_version')}"
 get_ipython().run_line_magic(  # noqa: F821  (provided by the notebook runtime)
-    "pip", f"install --quiet dbt=={dbutils.widgets.get('dbt_version')}"
+    "pip", f"install --quiet {_spec}"
 )
 
 # COMMAND ----------
@@ -65,6 +70,7 @@ http_path = dbutils.widgets.get("http_path").strip()
 secret_scope = dbutils.widgets.get("secret_scope").strip()
 secret_key = dbutils.widgets.get("secret_key").strip()
 threads = int(dbutils.widgets.get("threads") or 4)
+profile_name = dbutils.widgets.get("profile_name").strip() or "uc_compat"
 commands = [line.strip() for line in dbutils.widgets.get("commands").splitlines() if line.strip()]
 
 host = dbutils.widgets.get("host").strip()
@@ -182,6 +188,8 @@ os.environ.update(
         "DBT_SOURCE_SCHEMA": f"{schema}_bronze",
         "DBT_SOURCE_TABLE": "seed_bronze_customers",
         "DBT_SOURCE_TS_COLUMN": "_ingested_at",
+        # The dbt 1.x fixture reads its own schema variable.
+        "DBT_SCHEMA_V1": schema,
     }
 )
 
@@ -189,7 +197,7 @@ report = run_dbt_job(
     commands=commands,
     project_dir=work_dir,
     generate_profile=True,   # writes profiles.yml from the env vars above
-    profile_name="uc_compat",  # must match `profile:` in dbt_project.yml
+    profile_name=profile_name,  # must match `profile:` in dbt_project.yml
     target="live",
     threads=threads,
     # A scheduled job must not report success because --select matched nothing.
@@ -204,7 +212,15 @@ report = run_dbt_job(
 
 rows = report.rows()
 if rows:
-    display(spark.createDataFrame(rows))
+    # Every value goes to a string with an explicit schema: a column that is None on
+    # every row makes Spark's inference fail with CANNOT_DETERMINE_TYPE.
+    columns = ["command", "unique_id", "status", "execution_time", "relation_name", "message"]
+    display(
+        spark.createDataFrame(
+            [[("" if row.get(c) is None else str(row.get(c))) for c in columns] for row in rows],
+            schema=", ".join(f"{c} string" for c in columns),
+        )
+    )
 else:
     print("no node-level results (e.g. `dbt parse`)")
 

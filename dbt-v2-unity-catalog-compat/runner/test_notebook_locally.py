@@ -85,8 +85,8 @@ class _DBUtils:
 class _Spark:
     conf = types.SimpleNamespace(get=lambda key: os.environ["DBT_HOST"])
 
-    def createDataFrame(self, rows):
-        return rows
+    def createDataFrame(self, rows, schema=None):
+        return {"schema": schema, "rows": rows}
 
 
 # The stub context is built by calling _Ctx(), so patch entry_point accordingly.
@@ -96,10 +96,18 @@ _Notebook.entry_point = types.SimpleNamespace(
     )
 )
 
+class _IPython:
+    """The notebook installs dbt through the pip magic; here it is a no-op."""
+
+    def run_line_magic(self, magic, line):
+        print(f"[stub] %{magic} {line}")
+
+
 env = {
     "dbutils": _DBUtils(),
     "spark": _Spark(),
     "display": lambda rows: print("display():", rows),
+    "get_ipython": lambda: _IPython(),
     "__name__": "__notebook__",
 }
 
