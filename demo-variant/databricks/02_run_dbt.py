@@ -33,9 +33,11 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
+import json
 import os
 import shutil
 import tempfile
+import time
 
 http_path = dbutils.widgets.get("http_path").strip()
 users_catalog = dbutils.widgets.get("users_catalog").strip()
@@ -107,12 +109,15 @@ except ImportError:  # dbt-core 1.x
 
 runner = dbtRunner()
 results = {}
+seconds = {}
 for command in ("run", "test"):
     argv = [command, "--project-dir", project, "--profiles-dir", project]
     print(f"\n→ dbt {' '.join(argv)}")
+    started = time.time()
     res = runner.invoke(argv)
+    seconds[command] = round(time.time() - started, 2)
     results[command] = res
-    print(f"  success={res.success}")
+    print(f"  success={res.success} in {seconds[command]}s")
     if res.exception:
         raise RuntimeError(f"dbt {command} failed: {res.exception}")
 
@@ -121,6 +126,20 @@ for command in ("run", "test"):
 # MAGIC %md ## What dbt produced
 
 # COMMAND ----------
+
+
+def engine_label():
+    """Which dbt is actually installed: the v2 distribution is `dbt`, v1 is `dbt-core`."""
+    import importlib.metadata as md
+
+    parts = []
+    for dist in ("dbt", "dbt-core", "dbt-databricks", "dbt-spark"):
+        try:
+            parts.append(f"{dist} {md.version(dist)}")
+        except md.PackageNotFoundError:
+            continue
+    return ", ".join(parts) or "unknown"
+
 
 def node_id(result):
     """dbt v2 puts unique_id on the row; dbt-core 1.x puts it on result.node."""
@@ -160,4 +179,17 @@ failed = [
 if failed:
     raise RuntimeError(f"dbt reported failures: {failed}")
 
-dbutils.notebook.exit(f"{users_catalog}.{out_schema}.users_enriched built and tested")
+# A JSON exit value, so a caller gets the timings and not just a word.
+dbutils.notebook.exit(
+    json.dumps(
+        {
+            "target": f"{users_catalog}.{out_schema}.users_enriched",
+            "engine": engine_label(),
+            "compute": "sql warehouse",
+            "seconds": seconds,
+            "nodes": {node_id(n): round(getattr(n, "execution_time", 0.0) or 0.0, 2)
+                      for res in results.values()
+                      for n in (getattr(res.result, "results", []) or [])},
+        }
+    )
+)

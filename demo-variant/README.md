@@ -186,6 +186,63 @@ VARIANT n'a **ni égalité ni ordre** : une colonne VARIANT ne peut pas porter u
 
 ---
 
+## Performance mesurée
+
+Même projet, même modèle (1 modèle + 4 tests, 100 lignes), notebooks serverless. Temps dbt
+relevés par le notebook lui-même, temps de bout en bout par l'API Jobs.
+
+| chemin | moteur | `dbt run` | dont le modèle | `dbt test` | exécution notebook | run total |
+|---|---|---|---|---|---|---|
+| warehouse, warehouse **froid** | dbt-core 1.12.3 + dbt-databricks 1.12.5 | 34,98 s | 13,55 s | 3,56 s | 112 s | 117,0 s |
+| warehouse, warehouse **chaud** | idem | 10,78 s | 3,11 s | 2,71 s | 53 s | 57,7 s |
+| warehouse, **dbt 2.0.4** | dbt 2.0.4 (Fusion) | **5,96 s** | 4,62 s | 2,20 s | 43 s | 48,1 s |
+| compute du notebook | dbt-core 1.12.5 + dbt-spark 1.11.0 | 14,15 s | 9,52 s | 5,79 s | 75 s | 80,0 s |
+
+Unity Catalog OSS en local (conteneur 4 vCPU, `local[*]`) : script complet 73,7 s, dont
+`dbt run` (merge incrémental) 43,98 s et `dbt test` 10,13 s ; le reste est la construction
+de la session Spark et le chargement des jars.
+
+Ce que disent ces chiffres :
+
+1. **Le surcoût propre à dbt est ce qui sépare v1 de v2**, pas l'exécution SQL. À chaud,
+   `dbt run` − temps du modèle vaut ≈ 7,7 s en v1 contre ≈ 1,3 s en v2 (parse, compile,
+   introspection du catalogue). Sur le nœud lui-même, même warehouse, même requête :
+   3,11 s (v1) contre 4,62 s (v2) — du même ordre.
+2. **L'installation de dbt dans le notebook domine tout le reste** : ≈ 73 s pour
+   `dbt-databricks`, ≈ 55 s pour `dbt-spark`, ≈ 35 s pour `dbt==2.0.4` (une seule roue avec
+   l'extension native). Sur un projet réel, c'est là qu'il faut agir (environnement
+   serverless pré-construit ou bibliothèque de cluster plutôt qu'un `%pip install` par run —
+   non testé ici).
+3. **Un warehouse froid coûte ~25 s** sur le premier modèle (13,55 s → 3,11 s entre le run
+   froid et le run chaud).
+4. **La première invocation dbt d'un process est chère** : en local, `dbt test` prend 71 s la
+   première fois puis 14,3 s (threads=1) / 8,0 s (threads=4) — mesuré en inversant l'ordre
+   pour vérifier que c'est bien le démarrage à froid, pas le parallélisme.
+5. **`threads > 1` fonctionne sur une session Spark partagée** (vérifié : 4 tests, 8,0 s à 4
+   threads contre 14,3 s à 1 thread). Les profils du repo restent à `threads: 1` par
+   prudence ; `dbt run --threads 4` suffit à l'augmenter.
+
+## Fonctionnalités : ce que chaque chemin sait faire
+
+Inventaire lu dans les paquets installés (`dbt-databricks` 1.12.5, `dbt-spark` 1.11.0) ; la
+colonne v2 reprend ce qui a été vérifié à l'exécution dans `../dbt-v2-unity-catalog-compat/`.
+
+| | `dbt-databricks` (warehouse) | dbt v2 Fusion (warehouse) | `dbt-spark` session (notebook / UC OSS) |
+|---|---|---|---|
+| noms à 3 niveaux, `catalog:` dans `sources.yml` | oui (`DatabricksIncludePolicy.database = True`) | oui | **non** (`SparkIncludePolicy.database = False`) |
+| matérialisations livrées | table, view, incremental, seed, snapshot, clone, **materialized_view, streaming_table, metric_view, functions** | MV et streaming table vérifiées | table, view, incremental, seed, snapshot, clone |
+| stratégies incrémentales | append, merge, insert_overwrite, replace_where, delete+insert, microbatch | merge vérifié (`describe history`) | append, merge, insert_overwrite, microbatch |
+| modèles Python | oui (`submission_method`) | vérifié (`serverless_cluster`) | macro `py_write_table` présente, non testée |
+| grants / tags UC | plomberie complète | vérifié | minimal : 2 macros DCL seulement |
+| `catalogs.yml` `type: unity`, UniForm/Iceberg | non | vérifié | non |
+| `threads > 1` | oui (connexions parallèles au warehouse) | oui | oui, vérifié sur session partagée |
+| écrire dans Unity Catalog **OSS** | hors sujet | **impossible** (Iceberg REST en lecture seule, `405`) | **seul chemin qui écrit** |
+| se passer d'un warehouse | non | non (pas d'adaptateur session) | **oui** |
+
+En résumé : `dbt-databricks` (ou v2) pour les fonctions Unity Catalog et Databricks,
+`dbt-spark` en session pour économiser un compute ou pour atteindre UC OSS — au prix des
+noms à deux parties, des matérialisations Databricks et de la partie grants.
+
 ## Résultats vérifiés
 
 Exécuté le 2026-09-18 — jobs serverless sur le workspace de test, et en local dans ce
@@ -194,9 +251,9 @@ conteneur.
 | Chaîne | Versions | Résultat |
 |---|---|---|
 | Databricks, création des tables | serverless | `demo_users.core.users` 100 lignes ; `demo_cities.core.cities` MANAGED/DELTA, `metadata` de type `variant` |
-| Databricks, dbt via warehouse | dbt-core 1.12.x + dbt-databricks | `dbt run` + `dbt test` OK → `demo_users.marts.users_enriched` |
-| Databricks, dbt via warehouse | **dbt 2.0.4** (moteur Fusion) | même notebook, `--pip-spec dbt==2.0.4` → OK |
-| Databricks, dbt **sans warehouse** | dbt-core 1.12.x + dbt-spark `method: session` | session `pyspark.sql.connect.session.SparkSession`, `dbt run` OK → `demo_users.marts_session.users_enriched`, 100 lignes |
+| Databricks, dbt via warehouse | dbt-core 1.12.3 + dbt-databricks 1.12.5 | `dbt run` + `dbt test` OK → `demo_users.marts.users_enriched` |
+| Databricks, dbt via warehouse | **dbt 2.0.4** (moteur Fusion) | même notebook et même projet, `--pip-spec dbt==2.0.4` → OK |
+| Databricks, dbt **sans warehouse** | dbt-core 1.12.5 + dbt-spark 1.11.0 `method: session` | session `pyspark.sql.connect.session.SparkSession`, `dbt run` + `dbt test` OK → `demo_users.marts_session.users_enriched`, 100 lignes |
 | UC OSS, création des tables | UC OSS 0.6.0, connecteur 0.4.1, client 0.6.0, Spark 4.1.3, Delta 4.4.0 | deux tables Delta **externes**, `metadata` en `variant` |
 | UC OSS, dbt | dbt-core 1.12.5 + dbt-spark 1.11.0, `method: session` | `dbt run` 1/1 + `dbt test` 4/4 → 100 lignes, 100 `user_id` distincts ; 2ᵉ passage idempotent |
 
