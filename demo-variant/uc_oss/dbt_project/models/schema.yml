@@ -1,0 +1,12 @@
+version: 2
+
+models:
+  - name: users_enriched
+    description: "Users joined with their city reference, VARIANT metadata flattened"
+    columns:
+      - name: user_id
+        tests: [not_null, unique]
+      - name: population
+        tests: [not_null]
+      - name: region
+        tests: [not_null]

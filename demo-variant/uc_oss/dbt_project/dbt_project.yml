@@ -1,0 +1,7 @@
+name: demo_variant_oss
+version: "1.0.0"
+config-version: 2
+profile: demo_variant_oss
+model-paths: ["models"]
+# file_format and location_root live in the model's own config(): a project-level
+# +location_root was not picked up by dbt-spark's location_clause macro.

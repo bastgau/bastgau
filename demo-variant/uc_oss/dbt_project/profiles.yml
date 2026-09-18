@@ -1,0 +1,15 @@
+# dbt-spark, method: session — dbt runs SQL through the SparkSession the calling
+# script already built (Unity Catalog connector wired in, defaultCatalog = demo_users).
+#
+# dbt-spark renders two-part names only (include_policy.database = False), so:
+#   * the output schema is plain ("marts"), the catalog coming from defaultCatalog;
+#   * a source in another catalog carries it in `schema` ("demo_cities.core").
+demo_variant_oss:
+  target: dev
+  outputs:
+    dev:
+      type: spark
+      method: session
+      host: localhost
+      schema: "{{ env_var('OSS_OUT_SCHEMA', 'marts') }}"
+      threads: 1

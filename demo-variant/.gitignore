@@ -1,0 +1,9 @@
+.venv/
+.uc/
+.jars/
+data/
+spark-warehouse/
+target/
+logs/
+__pycache__/
+.user.yml

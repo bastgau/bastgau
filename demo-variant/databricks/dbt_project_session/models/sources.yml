@@ -1,0 +1,13 @@
+version: 2
+
+sources:
+  # No `catalog:` key here: dbt-spark ignores it, so the catalog travels inside `schema`.
+  - name: users_src
+    schema: "{{ env_var('USERS_SCHEMA', 'demo_users.core') }}"
+    tables:
+      - name: users
+
+  - name: cities_src
+    schema: "{{ env_var('CITIES_SCHEMA', 'demo_cities.core') }}"
+    tables:
+      - name: cities

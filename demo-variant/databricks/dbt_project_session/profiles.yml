@@ -1,0 +1,16 @@
+# dbt-spark, method: session — no SQL warehouse at all. dbt-spark calls
+# SparkSession.builder.getOrCreate(), which inside a Databricks notebook returns the
+# notebook's own (Spark Connect) session, so the SQL runs on the notebook's compute.
+#
+# dbt-spark renders two-part names only, so:
+#   * the output schema is plain; the catalog comes from `USE CATALOG`, set by the notebook;
+#   * a source in another catalog carries the catalog in `schema` ("demo_cities.core").
+demo_variant_session:
+  target: dev
+  outputs:
+    dev:
+      type: spark
+      method: session
+      host: localhost
+      schema: "{{ env_var('DBT_SCHEMA', 'marts_session') }}"
+      threads: 1

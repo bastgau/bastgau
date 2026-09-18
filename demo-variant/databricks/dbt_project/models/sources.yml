@@ -1,0 +1,15 @@
+version: 2
+
+sources:
+  # Two sources, in two different Unity Catalog catalogs.
+  - name: users_src
+    catalog: "{{ env_var('USERS_CATALOG', 'demo_users') }}"
+    schema: "{{ env_var('SRC_SCHEMA', 'core') }}"
+    tables:
+      - name: users
+
+  - name: cities_src
+    catalog: "{{ env_var('CITIES_CATALOG', 'demo_cities') }}"
+    schema: "{{ env_var('SRC_SCHEMA', 'core') }}"
+    tables:
+      - name: cities

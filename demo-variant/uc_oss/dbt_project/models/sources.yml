@@ -1,0 +1,13 @@
+version: 2
+
+sources:
+  # Same trick as above: the catalog is part of `schema`, one source per catalog.
+  - name: users_src
+    schema: "{{ env_var('OSS_USERS_SCHEMA', 'demo_users.core') }}"
+    tables:
+      - name: users
+
+  - name: cities_src
+    schema: "{{ env_var('OSS_CITIES_SCHEMA', 'demo_cities.core') }}"
+    tables:
+      - name: cities

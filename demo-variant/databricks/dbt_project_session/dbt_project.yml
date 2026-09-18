@@ -1,0 +1,5 @@
+name: demo_variant_session
+version: "1.0.0"
+config-version: 2
+profile: demo_variant_session
+model-paths: ["models"]
