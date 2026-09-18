@@ -797,6 +797,29 @@ enregistre), mais ce n'est plus dbt qui pilote l'enregistrement.
 
 ## 10. Synthèse : testé / non testé
 
+### En une grille
+
+**dbt v2**
+
+* ✅ **Databricks avec un SQL warehouse** — le seul moteur SQL vérifié.
+* ❌ **Databricks sur job compute seul** : le compute serverless du job orchestre très bien dbt
+  (notebook exécuté, `build` à 11 nœuds), mais il ne peut pas *servir* le SQL — l'adaptateur exige un
+  `http_path` de warehouse, et le notebook lève une erreur explicite quand il est vide, le serverless
+  n'ayant aucun cluster à emprunter. Sans warehouse, rien ne tourne.
+* ❓ **Databricks sur cluster all-purpose** — ni comme moteur, ni comme orchestrateur : org de test
+  *serverless-only*.
+* ❌ **UC OSS en écriture** (Iceberg REST en lecture seule ; ni plugins, ni `external format=delta`)
+  — mais ✅ **UC OSS en lecture de Delta** (`delta_scan`).
+* ✅ Unity Catalog **chez Databricks** : c'est l'objet de tout le protocole, pas un point ouvert.
+
+**dbt v1**
+
+* ❓ **Databricks** (`dbt-databricks`) — trou complet, la question des `grants` comprise.
+* ✅ **UC OSS en écriture** via `dbt-duckdb` + plugin (API UC native) — vérifié ici, 10/10.
+* ✅ **UC OSS via Spark** — rapporté par l'utilisateur de ce dépôt, **non reproduit ici**. Cohérent
+  avec le reste : `dbt-spark` 1.x a `method: session`, que dbt v2 a supprimé, et l'intégration Spark
+  de UC OSS gère lecture *et* écriture Delta. C'est le chemin que v2 a fermé.
+
 Quatre combinaisons possibles, dont **trois ont été exercées** et une pas du tout.
 
 | | Databricks (warehouse SQL) | Unity Catalog OSS (local) |
