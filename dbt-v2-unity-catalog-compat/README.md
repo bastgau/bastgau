@@ -452,8 +452,10 @@ allocations concurrentes — brider avec `--threads 1` sur un workspace à quota
 **Question** : le protocole tourne-t-il contre [Unity Catalog OSS](https://github.com/unitycatalog/unitycatalog)
 en local, sans compte Databricks ?
 
-**Réponse** : l'écriture est impossible, et ce n'est pas dbt qui bloque — c'est UC OSS. La *lecture*
-de Delta en local, elle, fonctionne. Vérifié de bout en bout par `uc-oss/run_uc_oss_checks.sh`
+**Réponse courte** : **oui avec dbt-core 1.x + dbt-duckdb**, **non avec dbt v2**. Les deux sont
+vérifiés ici, et la différence ne tient pas à UC OSS mais au chemin emprunté — API Iceberg REST
+(lecture seule) contre API UC *native* (qui accepte l'enregistrement). Voir « Écrire dans UC OSS »
+plus bas. La *lecture* de Delta en local fonctionne dans les deux cas. Vérifié de bout en bout par `uc-oss/run_uc_oss_checks.sh`
 (**31 contrôles, 31 PASS**) avec dbt **2.0.4**, sur
 UC OSS **0.6.0** (la dernière version) *et* **0.3.0** — résultat identique sur les deux.
 
@@ -730,3 +732,65 @@ Donc : dbt lit du Delta en local sans difficulté, mais pas *via* le catalogue U
 est pourtant bien enregistrée (`EXTERNAL` / `DELTA` / `storage_location`), et son emplacement suffit à
 `delta_scan`. Le contrôle correspondant du script est écrit pour signaler la réparation éventuelle de
 cette incompatibilité au lieu de la figer.
+
+### Écrire dans UC OSS : le chemin qui marche
+
+Constat de départ : [dataroots décrit un montage qui y arrive](https://dataroots.io/blog/open-source-unity-catalog-with-dbt-duckdb),
+avec un plugin dbt-duckdb qui écrit des fichiers Delta puis enregistre la table auprès du serveur UC.
+Ce montage **contourne** l'API Iceberg REST — celle que dbt v2 utilise, et qui est en lecture seule.
+Reproduit ici de bout en bout par `uc-oss/run_dbt1x_uc_write.sh` (**10 contrôles, 10 PASS**), avec un
+plugin de ~130 lignes : `uc-oss/dbt1x/uc_delta.py`.
+
+Le mécanisme, vérifié : la matérialisation `external` de dbt-duckdb écrit d'abord un parquet de
+staging, puis appelle `store()` du plugin, qui convertit en Delta (`delta-rs`) et fait un
+`POST /api/2.1/unity-catalog/tables` — l'API **native**, qui accepte l'écriture. Résultat constaté
+dans UC OSS 0.6.0 :
+
+```
+customers_uc | EXTERNAL | DELTA
+  location: file:///…/delta/dbt_oss/analytics/customers_uc
+  colonnes: [('id','LONG'), ('name','STRING'), ('amount','DOUBLE')]
+```
+
+et la table relue ensuite par `delta_scan` — y compris depuis dbt v2.
+
+```yaml
+# profiles.yml — dbt-core 1.x + dbt-duckdb
+      type: duckdb
+      module_paths: [/chemin/vers/dbt1x]
+      plugins:
+        - module: uc_delta
+          alias: uc
+          config:
+            endpoint: http://127.0.0.1:8081/api/2.1/unity-catalog
+            catalog: dbt_oss
+            schema: analytics
+            delta_root: /tmp/delta
+```
+
+```sql
+{{ config(materialized='external', plugin='uc', location='/tmp/stage/customers_uc.parquet') }}
+select cast(1 as bigint) as id, 'alice' as name
+```
+
+### Pourquoi dbt v2 ne peut pas faire la même chose
+
+Trois portes fermées, toutes vérifiées :
+
+| Levier | État en dbt 2.0.4 |
+|---|---|
+| `catalogs.yml` `type: unity` | passe par l'Iceberg REST de UC OSS → `405` en écriture |
+| `plugins:` dans le profil duckdb | **accepté mais jamais chargé** : un `module: definitely_not_a_real_module_xyz` ne fait pas échouer le run |
+| `materialized='external'`, `format='delta'` | refusé : `Invalid format: delta. Allowed formats are: csv, parquet, json` (macro `dbt_internal_packages/dbt-duckdb/macros/materializations/external.sql`) |
+
+dbt v2 embarque donc un portage des macros dbt-duckdb (l'`external` fonctionne en csv/parquet/json,
+vérifié), mais **pas** le mécanisme de plugins Python dont dépend ce montage. Le pattern reste
+possible en deux temps (dbt v2 écrit un parquet en `external`, un script tiers convertit et
+enregistre), mais ce n'est plus dbt qui pilote l'enregistrement.
+
+| Stack | Écriture dans UC OSS |
+|---|---|
+| dbt-core 1.x + dbt-duckdb + plugin (API UC native) | ✅ vérifié, 10/10 |
+| dbt v2 + `catalogs.yml type: unity` (Iceberg REST) | ❌ `405` |
+| dbt v2 + `plugins:` | ❌ clé ignorée |
+| dbt v2 + `external format=delta` | ❌ format refusé |
